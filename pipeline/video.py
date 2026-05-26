@@ -102,26 +102,32 @@ def _fetch_images(keywords: list[str], count: int = 5) -> list[np.ndarray]:
         photos = resp.json().get("photos", [])
         images = []
         for photo in photos:
-            url = photo["src"].get("portrait") or photo["src"].get("large")
+            # Prefer large2x for quality, fall back down the chain
+            src = photo["src"]
+            url = src.get("large2x") or src.get("portrait") or src.get("large")
             if not url:
                 continue
-            img_bytes = requests.get(url, timeout=20).content
-            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            # Crop + resize to exact 9:16 dimensions
-            img_ratio = img.width / img.height
-            target_ratio = WIDTH / HEIGHT
-            if img_ratio > target_ratio:
-                # Image is wider — crop width
-                new_w = int(img.height * target_ratio)
-                offset = (img.width - new_w) // 2
-                img = img.crop((offset, 0, offset + new_w, img.height))
-            else:
-                # Image is taller — crop height
-                new_h = int(img.width / target_ratio)
-                offset = (img.height - new_h) // 2
-                img = img.crop((0, offset, img.width, offset + new_h))
-            img = img.resize((WIDTH, HEIGHT), Image.LANCZOS)
-            images.append(np.array(img))
+            try:
+                img_bytes = requests.get(url, timeout=20).content
+                img = Image.open(io.BytesIO(img_bytes))
+                img.load()                      # force decode now so bad files raise here
+                img = img.convert("RGB")
+                # Crop to exact 9:16
+                img_ratio = img.width / img.height
+                target_ratio = WIDTH / HEIGHT
+                if img_ratio > target_ratio:
+                    new_w = int(img.height * target_ratio)
+                    offset = (img.width - new_w) // 2
+                    img = img.crop((offset, 0, offset + new_w, img.height))
+                else:
+                    new_h = int(img.width / target_ratio)
+                    offset = (img.height - new_h) // 2
+                    img = img.crop((0, offset, img.width, offset + new_h))
+                img = img.resize((WIDTH, HEIGHT), Image.LANCZOS)
+                images.append(np.array(img))
+            except Exception as img_err:
+                logger.debug("Skipping Pexels image (decode error): %s", img_err)
+                continue
         logger.info("Pexels: fetched %d images for '%s'", len(images), query[:50])
         return images
     except Exception as e:
