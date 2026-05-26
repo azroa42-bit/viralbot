@@ -22,6 +22,35 @@ _STOP = {
     "what", "when", "who", "why", "new", "more", "just", "about", "after",
 }
 
+# Topics that match these patterns are low-quality for content creation:
+# pure brand searches, live scores, weather, lottery results, etc.
+_LOW_QUALITY_PATTERNS = [
+    r"\bscores?\b", r"\bresults?\b", r"\bstandings?\b", r"\bweather\b",
+    r"\blottery\b", r"\bnumbers?\b", r"\blive stream\b", r"\btickets?\b",
+    r"\bvs\.?\b", r"\bvs\s+\w",    # match-ups like "team vs team"
+    r"\bschedule\b", r"\blineup\b", r"\bdraw\b$",
+]
+
+# Pure brand/network names that generate branded-looking content
+_BRAND_STOPLIST = {
+    "fox sports", "espn", "nbc sports", "cbs sports", "abc news",
+    "cnn", "bbc", "nfl", "nba", "mlb", "nhl",
+}
+
+
+def _is_low_quality(topic: str) -> bool:
+    """Return True for topics that tend to produce bad or branded content."""
+    tl = topic.lower().strip()
+    if tl in _BRAND_STOPLIST:
+        return True
+    for pattern in _LOW_QUALITY_PATTERNS:
+        if re.search(pattern, tl):
+            return True
+    # Filter very short topics (1 word) — usually just a name with no angle
+    if len(tl.split()) == 1:
+        return True
+    return False
+
 
 def _keyword_set(topic: str) -> set[str]:
     """Extract meaningful words from a topic for similarity comparison."""
@@ -84,9 +113,12 @@ def aggregate_and_store(raw_trends: list[dict], max_trends: int) -> list[dict]:
 
     clusters.sort(key=lambda x: x["score"], reverse=True)
 
-    # ── Step 3: Filter already-seen, insert new trends ───────────────
+    # ── Step 3: Filter low-quality, already-seen; insert new trends ────
     stored = []
     for cluster in clusters:
+        if _is_low_quality(cluster["topic"]):
+            logger.debug("Skipping low-quality topic: %s", cluster["topic"][:60])
+            continue
         if trend_seen_today(cluster["topic"], cluster["source"]):
             logger.debug("Skipping already-seen: %s", cluster["topic"][:60])
             continue

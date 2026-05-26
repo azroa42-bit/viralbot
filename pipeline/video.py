@@ -36,7 +36,7 @@ FPS = 24
 
 # Voice: Jenny is warm and natural; slight slowdown + lower pitch = soothing
 VOICE       = "en-US-JennyNeural"
-VOICE_RATE  = "-8%"      # slightly slower than default
+VOICE_RATE  = "+10%"     # slightly faster — energetic Shorts pacing
 VOICE_PITCH = "-4Hz"     # slightly deeper = warmer feel
 
 # Ken Burns zoom range per clip

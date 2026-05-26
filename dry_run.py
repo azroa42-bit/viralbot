@@ -33,9 +33,19 @@ if not raw:
 logger.info("Aggregating top trends...")
 top = aggregator.aggregate_and_store(raw, max_trends=1)  # just 1 for the test
 if not top:
-    logger.info("All trends already seen today — resetting for dry run...")
-    # Force pick the highest-scored raw trend for demo purposes
-    best = sorted(raw, key=lambda x: x["score"], reverse=True)[0]
+    logger.info("All trends already seen today — picking best unseen for dry run...")
+    # Skip low-quality and already-seen, pick highest-scored remaining
+    from pipeline.aggregator import _is_low_quality
+    import db as _db
+    candidates = [
+        t for t in sorted(raw, key=lambda x: x["score"], reverse=True)
+        if not _is_low_quality(t["topic"])
+        and not _db.trend_seen_today(t["topic"], t["source"])
+    ]
+    if not candidates:
+        # Last resort: just take the top raw trend regardless
+        candidates = sorted(raw, key=lambda x: x["score"], reverse=True)
+    best = candidates[0]
     top = [best]
 
 trend = top[0]
