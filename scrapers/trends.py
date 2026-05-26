@@ -2,8 +2,8 @@
 Google Trends scraper — uses the public RSS feed directly.
 
 pytrends has repeated breakage with Google's API changes.
-The RSS feed at trends.google.com/trends/trendingsearches/daily/rss
-is stable, requires no API key, and returns the same data.
+The RSS feed at trends.google.com/trending/rss is stable,
+requires no API key, and returns the same data.
 """
 import logging
 import re
@@ -67,8 +67,12 @@ def get_trending(geo: str = "US", max_results: int = 30) -> list[dict]:
             traffic_el = item.find("ht:approx_traffic", ns)
             traffic = _parse_traffic(traffic_el.text if traffic_el is not None else "")
 
-            # Score: traffic-weighted, then by rank
-            score = traffic / 1000 if traffic else (max_results - rank) * 100
+            # Score: rank-based baseline so every item is non-zero.
+            # Add traffic bonus on top when the feed reports high traffic.
+            # New feed often shows "500+" (plain int) — scale those up too.
+            rank_score = (max_results - rank) * 100          # 3000 … 100
+            traffic_bonus = traffic / 100 if traffic > 1000 else 0
+            score = rank_score + traffic_bonus
 
             trends.append({
                 "topic": topic[:200],
