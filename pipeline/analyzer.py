@@ -102,6 +102,7 @@ Return JSON with this EXACT schema (no extra fields, no markdown fences, output 
             ],
             max_tokens=900,
             temperature=0.7,
+            response_format={"type": "json_object"},
         )
         text = resp.choices[0].message.content.strip()
         if text.startswith("```"):

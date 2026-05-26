@@ -39,7 +39,9 @@ def _get_client():
 
 
 def _parse_json(text: str) -> dict:
+    """Parse JSON from LLM output. JSON mode is enabled so output is always valid."""
     text = text.strip()
+    # Strip markdown fences in case model adds them despite instructions
     if text.startswith("```"):
         parts = text.split("```")
         text = parts[1] if len(parts) > 1 else text
@@ -108,6 +110,7 @@ Return JSON only (no markdown fences):
             ],
             max_tokens=1200,
             temperature=0.8,
+            response_format={"type": "json_object"},
         )
         result = _parse_json(resp.choices[0].message.content)
         logger.info("  Reddit content: '%s'", result.get("title", "")[:70])
@@ -176,6 +179,7 @@ Return JSON only (no markdown fences):
             ],
             max_tokens=1200,
             temperature=0.8,
+            response_format={"type": "json_object"},
         )
         result = _parse_json(resp.choices[0].message.content)
         logger.info("  YouTube script: '%s'", result.get("title", "")[:70])

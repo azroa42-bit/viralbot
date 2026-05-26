@@ -97,6 +97,7 @@ Return JSON only (no markdown fences):
             ],
             max_tokens=1400,
             temperature=0.7,
+            response_format={"type": "json_object"},
         )
         result = _parse_json(resp.choices[0].message.content)
         logger.info("  Content generated for: %s", product["name"][:60])
