@@ -16,7 +16,7 @@ from pathlib import Path
 import edge_tts
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from moviepy.editor import AudioFileClip, ImageClip, concatenate_videoclips
+from moviepy import AudioFileClip, ImageClip, concatenate_videoclips
 
 from config import config
 
@@ -149,10 +149,10 @@ def create_short(title: str, script: str, output_name: str = None) -> Path | Non
 
         # 3. Concatenate slides, add audio
         video = concatenate_videoclips(clips, method="compose")
-        video = video.set_audio(audio_clip)
+        video = video.with_audio(audio_clip)
 
         # 4. Export
-        logger.info("Rendering video → %s", video_path)
+        logger.info("Rendering video -> %s", video_path)
         video.write_videofile(
             str(video_path),
             fps=FPS,

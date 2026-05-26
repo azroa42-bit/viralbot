@@ -28,7 +28,7 @@ import edge_tts
 import numpy as np
 import requests
 from PIL import Image, ImageDraw, ImageFont
-from moviepy.editor import AudioFileClip, ImageClip, concatenate_videoclips
+from moviepy import AudioFileClip, ImageClip, concatenate_videoclips
 
 from config import config
 
@@ -249,7 +249,7 @@ def create_product_short(product: dict, script: str,
             clips.append(ImageClip(frame, duration=secs_each))
 
         video = concatenate_videoclips(clips, method="compose")
-        video = video.set_audio(audio_clip)
+        video = video.with_audio(audio_clip)
 
         logger.info("  Rendering product video → %s", video_path)
         video.write_videofile(
