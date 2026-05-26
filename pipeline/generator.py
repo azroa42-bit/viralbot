@@ -1,31 +1,18 @@
 """
 Content Generator — produces platform-specific content using trend analysis.
 
-Uniqueness is enforced by:
-1. Using the specific angle from analyzer.py (not just the trending headline)
-2. Explicitly telling Claude what the generic version looks like and to avoid it
-3. Injecting the hook_type and target_emotion so the format differs from existing content
-4. Rotating through 3 angles (Reddit vs YouTube get different angles)
-5. Never rephrasing the original — always approaching from a unique perspective
+Uses Google Gemini 2.0 Flash (free tier).
 """
 import json
 import logging
-import anthropic
+from google import genai
+from google.genai import types
 from config import config
 
 logger = logging.getLogger(__name__)
 
 _client = None
 
-
-def _get_client():
-    global _client
-    if _client is None:
-        _client = anthropic.Anthropic(api_key=config.anthropic_api_key)
-    return _client
-
-
-# Cached system prompt (reduces API cost ~90% via prompt caching)
 _SYSTEM = """You are an expert viral content creator. You create original, engaging content
 that approaches trending topics from FRESH ANGLES — never just summarizing what already exists.
 
@@ -36,11 +23,17 @@ Your content rules:
 - Evoke the specified target_emotion through specific details, not generic claims.
 - Write in a natural, human voice — conversational, not corporate.
 - Posts must feel like they were written by a real person who has a take, not a bot.
-- Output valid JSON exactly matching the requested schema."""
+- Output valid JSON exactly matching the requested schema. No markdown fences."""
+
+
+def _get_client():
+    global _client
+    if _client is None:
+        _client = genai.Client(api_key=config.gemini_api_key)
+    return _client
 
 
 def _parse_json(text: str) -> dict:
-    """Strip markdown fences and parse JSON."""
     text = text.strip()
     if text.startswith("```"):
         parts = text.split("```")
@@ -62,15 +55,9 @@ def _hook_instruction(hook_type: str) -> str:
 
 
 def generate_reddit_content(trend: dict, analysis: dict = None, angle_idx: int = 0) -> dict | None:
-    """
-    Generate a Reddit post using the trend analysis.
-    angle_idx: 0=first unique angle, 1=second, 2=third (rotated per platform/run)
-    """
     raw = json.dumps(trend.get("raw_data", {}), ensure_ascii=False)
 
-    # Build analysis block — this is the core of uniqueness enforcement
     analysis_block = ""
-    chosen_angle = ""
     if analysis:
         angles = analysis.get("unique_angles", [])
         chosen_angle = angles[angle_idx % len(angles)] if angles else ""
@@ -78,27 +65,23 @@ def generate_reddit_content(trend: dict, analysis: dict = None, angle_idx: int =
         revenue_niche = analysis.get("revenue_niche", "MEDIUM")
         monetization_angle = analysis.get("monetization_angle", "")
 
-        # High-CPM topics get an extra instruction to weave in monetizable search terms
         revenue_note = ""
         if revenue_niche == "HIGH":
             revenue_note = (
-                f"\nREVENUE NOTE: This topic sits in a HIGH-CPM niche. "
-                f"Naturally weave in the following monetization angle to attract "
-                f"high-value advertisers: {monetization_angle}"
+                f"\nREVENUE NOTE: HIGH-CPM niche. Naturally weave in: {monetization_angle}"
             )
 
         analysis_block = f"""
-TREND ANALYSIS (use this to guide everything):
+TREND ANALYSIS:
 - Why it's viral: {analysis.get('why_viral', '')}
-- What the audience really wants: {analysis.get('audience_insight', '')}
+- Audience wants: {analysis.get('audience_insight', '')}
 - YOUR ASSIGNED ANGLE: {chosen_angle}
 - Hook instruction: {hook_instruction}
-- Target emotion to evoke: {analysis.get('target_emotion', 'curiosity')}
-- AVOID THIS GENERIC VERSION: {analysis.get('avoid', '')}
-- Keywords to weave in naturally: {', '.join(analysis.get('keywords', [])[:5])}{revenue_note}
+- Target emotion: {analysis.get('target_emotion', 'curiosity')}
+- AVOID THIS: {analysis.get('avoid', '')}
+- Keywords: {', '.join(analysis.get('keywords', [])[:5])}{revenue_note}
 
-CRITICAL: Do NOT summarize the trending content. Do NOT restate the headline.
-You must approach this ONLY from the assigned angle above."""
+CRITICAL: Do NOT summarize the trend. Approach ONLY from the assigned angle."""
 
     prompt = f"""Write a Reddit post about this topic.
 
@@ -107,20 +90,23 @@ Source: {trend['source']}
 Context: {raw[:500]}
 {analysis_block}
 
-Return JSON:
+Return JSON (no markdown fences):
 {{
-  "title": "Reddit post title from your unique angle only — no clickbait, under 300 chars",
-  "body": "3-4 paragraphs written from your assigned angle. Paragraph 1: hook (use the hook instruction). Paragraph 2-3: substance and insight. Paragraph 4: end with an open question to drive comments. Conversational tone, no bullet points, no headers."
+  "title": "Reddit post title from your unique angle — no clickbait, under 300 chars",
+  "body": "3-4 paragraphs from your angle. P1: hook. P2-3: insight. P4: open question. Conversational, no bullets, no headers."
 }}"""
 
     try:
-        resp = _get_client().messages.create(
-            model=config.claude_model,
-            max_tokens=1200,
-            system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": prompt}],
+        resp = _get_client().models.generate_content(
+            model=config.gemini_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=_SYSTEM,
+                max_output_tokens=1200,
+                temperature=0.8,
+            ),
         )
-        result = _parse_json(resp.content[0].text)
+        result = _parse_json(resp.text)
         logger.info("  Reddit content: '%s'", result.get("title", "")[:70])
         return result
     except Exception as e:
@@ -129,10 +115,6 @@ Return JSON:
 
 
 def generate_youtube_script(trend: dict, analysis: dict = None, angle_idx: int = 1) -> dict | None:
-    """
-    Generate a YouTube Shorts script using the trend analysis.
-    Uses angle_idx=1 by default so Reddit and YouTube get different angles.
-    """
     raw = json.dumps(trend.get("raw_data", {}), ensure_ascii=False)
 
     analysis_block = ""
@@ -145,22 +127,19 @@ def generate_youtube_script(trend: dict, analysis: dict = None, angle_idx: int =
 
         revenue_note = ""
         if revenue_niche == "HIGH":
-            revenue_note = (
-                f"\nREVENUE NOTE: HIGH-CPM niche. Naturally incorporate this monetization "
-                f"angle so the video ranks for advertiser-valued search terms: {monetization_angle}"
-            )
+            revenue_note = f"\nREVENUE NOTE: HIGH-CPM niche. Incorporate: {monetization_angle}"
 
         analysis_block = f"""
 TREND ANALYSIS:
 - Why it's viral: {analysis.get('why_viral', '')}
-- What viewers really want: {analysis.get('audience_insight', '')}
+- Viewer wants: {analysis.get('audience_insight', '')}
 - YOUR ASSIGNED ANGLE: {chosen_angle}
 - Hook instruction: {hook_instruction}
 - Target emotion: {analysis.get('target_emotion', 'curiosity')}
-- AVOID THIS GENERIC VERSION: {analysis.get('avoid', '')}
+- AVOID THIS: {analysis.get('avoid', '')}
 - Keywords: {', '.join(analysis.get('keywords', [])[:5])}{revenue_note}
 
-CRITICAL: Do NOT narrate the trending video/post. Approach ONLY from your assigned angle."""
+CRITICAL: Do NOT narrate the trending content. Approach ONLY from your assigned angle."""
 
     prompt = f"""Write a YouTube Shorts script about this topic.
 
@@ -169,30 +148,33 @@ Source: {trend['source']}
 Context: {raw[:500]}
 {analysis_block}
 
-Script length: 40-55 seconds spoken (roughly 110-145 words).
+Length: 40-55 seconds spoken (~110-145 words).
 Structure:
-  [HOOK 0-4s]    — execute the hook instruction. Must grab attention immediately.
-  [CONTENT 4-45s] — deliver the unique angle with 2-3 specific facts or insights.
-  [CTA 45-55s]   — "Follow for more" + one teaser of what's coming next.
+  [HOOK 0-4s] — execute the hook instruction immediately.
+  [CONTENT 4-45s] — unique angle with 2-3 specific facts.
+  [CTA 45-55s] — "Follow for more" + one teaser.
 
-The script must sound natural when read aloud — short sentences, contractions, no jargon.
+Natural spoken language — short sentences, contractions, no jargon.
 
-Return JSON:
+Return JSON (no markdown fences):
 {{
-  "title": "YouTube title using the unique angle + main keyword (under 70 chars)",
-  "description": "2 punchy sentences about the video from the unique angle. Add: #Shorts #[topic keyword] #viral",
-  "script": "The full spoken script, no stage directions, natural spoken English only",
+  "title": "YouTube title using the angle + main keyword (under 70 chars)",
+  "description": "2 punchy sentences + #Shorts #[keyword] #viral",
+  "script": "Full spoken script, no stage directions",
   "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6"]
 }}"""
 
     try:
-        resp = _get_client().messages.create(
-            model=config.claude_model,
-            max_tokens=1200,
-            system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
-            messages=[{"role": "user", "content": prompt}],
+        resp = _get_client().models.generate_content(
+            model=config.gemini_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=_SYSTEM,
+                max_output_tokens=1200,
+                temperature=0.8,
+            ),
         )
-        result = _parse_json(resp.content[0].text)
+        result = _parse_json(resp.text)
         logger.info("  YouTube script: '%s'", result.get("title", "")[:70])
         return result
     except Exception as e:

@@ -6,9 +6,10 @@ load_dotenv()
 
 
 class Config:
-    # ── Claude ────────────────────────────────────────────────────────────────
-    anthropic_api_key: str = os.getenv("ANTHROPIC_API_KEY", "")
-    claude_model: str = "claude-haiku-4-5-20251001"
+    # ── Gemini (free tier at aistudio.google.com) ────────────────────────────
+    gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
+    gemini_model: str = "gemini-2.0-flash"
+    claude_model: str = "gemini-2.0-flash"  # legacy alias used in logs
 
     # ── Reddit ────────────────────────────────────────────────────────────────
     reddit_client_id: str = os.getenv("REDDIT_CLIENT_ID", "")

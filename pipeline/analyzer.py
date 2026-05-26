@@ -1,18 +1,18 @@
 """
-Trend Analyzer — uses Claude to understand WHY a trend is viral before generating content.
+Trend Analyzer — uses Gemini to understand WHY a trend is viral before generating content.
 
-This is the most important layer for uniqueness:
-- Identifies the psychological trigger driving engagement
-- Surfaces 3 original angles that haven't been covered yet
-- Specifies what the generic/boring version looks like (so we avoid it)
-- Determines the optimal hook type and target emotion
+Uses Google Gemini 2.0 Flash (free tier — no API billing required).
+Get a key at: aistudio.google.com → Get API key
 """
 import json
 import logging
-import anthropic
+from google import genai
+from google.genai import types
 from config import config
 
 logger = logging.getLogger(__name__)
+
+_client = None
 
 _ANALYSIS_SYSTEM = """You are a viral content analyst with deep expertise in social psychology,
 platform algorithms, and what makes content spread. Your job is to understand WHY a piece of
@@ -22,37 +22,29 @@ identify original angles that haven't been covered yet.
 Be brutally specific. "It's interesting" is not analysis. "It triggers cognitive dissonance
 because people assumed X was safe but this reveals Y" is analysis.
 
-Always output valid JSON exactly matching the requested schema."""
+Always output valid JSON exactly matching the requested schema. No markdown fences."""
+
+
+def _get_client():
+    global _client
+    if _client is None:
+        _client = genai.Client(api_key=config.gemini_api_key)
+    return _client
 
 
 def analyze(trend: dict) -> dict | None:
     """
     Deep-analyze a trend to understand its virality driver and surface unique angles.
-
-    Returns:
-        {
-          "virality_driver":  SURPRISE | CONTROVERSY | EDUCATION | EMOTION | HUMOR | FEAR | CURIOSITY
-          "core_topic":       underlying subject in plain language (not the headline)
-          "why_viral":        1-2 sentences — the actual psychological mechanism
-          "audience_insight": what the audience REALLY wants to know / feel from this
-          "unique_angles":    list of 3 specific original takes NOT in existing coverage
-          "target_emotion":   awe | anger | curiosity | empathy | fear | joy | surprise
-          "hook_type":        QUESTION | STAT | STORY | COUNTERINTUITIVE | CURIOSITY_GAP
-          "avoid":            what the generic, expected, boring version of this content looks like
-          "keywords":         5-7 SEO/search terms people use when looking for this topic
-        }
     """
     raw_data = trend.get("raw_data", {})
 
-    # Build comment context — top comments are gold: they show the actual reaction
     comment_ctx = ""
     top_comments = raw_data.get("top_comments", [])
     if top_comments:
-        comment_ctx = "\n\nTop audience reactions (comments/replies):\n" + "\n".join(
+        comment_ctx = "\n\nTop audience reactions:\n" + "\n".join(
             f'  [{c["score"]} pts] "{c["body"][:200]}"' for c in top_comments[:5]
         )
 
-    # Engagement signals
     eng_signals = ""
     if "upvotes" in raw_data:
         eng_signals = (
@@ -65,9 +57,7 @@ def analyze(trend: dict) -> dict | None:
         eng_signals = (
             f"\nYouTube: {raw_data['views']:,} views, "
             f"{raw_data.get('likes', 0):,} likes, "
-            f"{raw_data.get('comments', 0):,} comments, "
-            f"engagement rate: {raw_data.get('engagement_rate_pct', 0):.2f}%, "
-            f"CPM tier multiplier: {raw_data.get('cpm_multiplier', 1.0):.1f}×"
+            f"{raw_data.get('comments', 0):,} comments"
         )
 
     body_ctx = ""
@@ -82,43 +72,42 @@ Trending title: {trend['topic']}
 Source: {trend['source']}
 Virality score: {trend['score']:.0f}{eng_signals}{body_ctx}{comment_ctx}
 
-Return JSON with this EXACT schema (no extra fields):
+Return JSON with this EXACT schema (no extra fields, no markdown fences):
 {{
   "virality_driver": "SURPRISE",
   "core_topic": "the real underlying subject in plain language (10-15 words)",
-  "why_viral": "2-3 sentences: the specific psychological mechanism — WHY people can't scroll past this",
-  "audience_insight": "what the audience secretly wants from this content: the question they need answered or feeling they want validated",
+  "why_viral": "2-3 sentences: the specific psychological mechanism",
+  "audience_insight": "what the audience secretly wants from this content",
   "unique_angles": [
-    "ANGLE_1: [specific original perspective] — explain the angle and why it hasn't been covered",
-    "ANGLE_2: [counterintuitive or contrarian take] — name the counterintuitive claim specifically",
-    "ANGLE_3: [personal/practical connection] — how this affects the reader's daily life specifically"
+    "ANGLE_1: specific original perspective not in existing coverage",
+    "ANGLE_2: counterintuitive or contrarian take",
+    "ANGLE_3: personal/practical connection to daily life"
   ],
   "target_emotion": "curiosity",
   "hook_type": "CURIOSITY_GAP",
-  "avoid": "1-2 sentences describing what the generic, forgettable version of this content looks like so we avoid it",
+  "avoid": "what the generic, forgettable version of this content looks like",
   "keywords": ["keyword1", "keyword2", "keyword3", "keyword4", "keyword5"],
-  "revenue_niche": "HIGH | MEDIUM | LOW — HIGH if topic overlaps with finance, investing, tech, software, career, health, education; MEDIUM for news/politics/howto; LOW for pure entertainment/gaming",
-  "monetization_angle": "1 sentence: a specific sub-topic or search query within this trend that attracts high-CPM advertisers (e.g. investing, software tools, career skills, health products)"
+  "revenue_niche": "HIGH",
+  "monetization_angle": "specific sub-topic that attracts high-CPM advertisers"
 }}"""
 
     try:
-        client = anthropic.Anthropic(api_key=config.anthropic_api_key)
-        resp = client.messages.create(
-            model=config.claude_model,
-            max_tokens=900,
-            system=[{
-                "type": "text",
-                "text": _ANALYSIS_SYSTEM,
-                "cache_control": {"type": "ephemeral"},
-            }],
-            messages=[{"role": "user", "content": prompt}],
+        resp = _get_client().models.generate_content(
+            model=config.gemini_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=_ANALYSIS_SYSTEM,
+                max_output_tokens=900,
+                temperature=0.7,
+            ),
         )
-        text = resp.content[0].text.strip()
+        text = resp.text.strip()
         if text.startswith("```"):
-            text = text.split("```")[1]
+            parts = text.split("```")
+            text = parts[1] if len(parts) > 1 else text
             if text.startswith("json"):
                 text = text[4:]
-        result = json.loads(text)
+        result = json.loads(text.strip())
         logger.info(
             "  Analysis: driver=%-12s hook=%-16s emotion=%-10s revenue=%s",
             result.get("virality_driver", "?"),
