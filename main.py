@@ -1,20 +1,23 @@
 """
 ViralBot — Viral Content Creator
-Pipeline per cycle:
-  1. Scrape  — Reddit hot posts + YouTube trending + Google Trends
-  2. Aggregate — deduplicate + cross-platform score boost, pick top N
-  3. Enrich  — fetch top comments for selected trends (reveals WHY it's viral)
-  4. Analyze — Claude identifies virality driver + 3 unique angles + what to avoid
-  5. Generate — platform-specific content using the analysis (Reddit + YouTube)
-  6. Produce — edge-tts voiceover + Pillow slides + moviepy → MP4 Short
-  7. Publish — post to Reddit, upload to YouTube
-  8. Log     — SQLite tracks everything, prevents duplicates
 
-Run once:   python main.py --once
-Scheduler:  python main.py
+Two parallel pipelines:
+
+TREND PIPELINE  (every 2h)
+  Scrape → Aggregate → Enrich → Analyze → Generate → Video → Post
+  Platforms: Reddit, YouTube Shorts
+
+PRODUCT PIPELINE  (every 6h)
+  Scan affiliate markets → Score → Generate product content → Product video → Post
+  Platforms: YouTube Shorts, TikTok, Reddit
+  Sources:   Amazon PA API, ClickBank, TikTok Shop, manual products
+
+Run once:         python main.py --once
+Products only:    python main.py --products-only
+Trends only:      python main.py --trends-only
+Scheduler (both): python main.py
 """
 import argparse
-import json
 import logging
 import sys
 from datetime import datetime
@@ -24,15 +27,17 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 import db
 from config import config
-from pipeline import aggregator
-from pipeline import analyzer
-from pipeline import generator
+from pipeline import aggregator, analyzer, generator
 from pipeline.video import create_short
+from pipeline.product_generator import generate_product_content
+from pipeline.product_video import create_product_short
 from publishers import reddit as reddit_pub
 from publishers import youtube as youtube_pub
+from publishers import tiktok as tiktok_pub
 from scrapers import reddit as reddit_scraper
 from scrapers import trends as trends_scraper
 from scrapers import youtube as youtube_scraper
+from scrapers.products import get_products
 
 logging.basicConfig(
     level=logging.INFO,
@@ -193,32 +198,181 @@ def run_pipeline():
     logger.info("=" * 65)
 
 
+def run_product_pipeline():
+    """
+    Affiliate product pipeline:
+    1. Scan Amazon, ClickBank, TikTok Shop, and manual products
+    2. Upsert into DB, pick unposted ones sorted by revenue score
+    3. Generate product content (PAS or Hook-Proof-CTA script)
+    4. Produce product video with image overlay
+    5. Post to YouTube Shorts, TikTok, and Reddit
+    """
+    logger.info("=" * 65)
+    logger.info("Product pipeline started — %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+    # ── 1. Scan ───────────────────────────────────────────────────────────────
+    all_products = get_products()
+    if not all_products:
+        logger.warning("No products scraped — configure API keys or MANUAL_PRODUCTS in .env")
+        return
+
+    # ── 2. Upsert into DB and pick unposted ───────────────────────────────────
+    for p in all_products:
+        db.upsert_product(
+            product_id=p["product_id"], source=p["source"],
+            name=p["name"], description=p.get("description", ""),
+            price=p.get("price", 0), commission_pct=p.get("commission_pct", 0),
+            affiliate_url=p.get("affiliate_url", ""),
+            image_url=p.get("image_url", ""),
+            category=p.get("category", ""),
+            rating=p.get("rating", 0), review_count=p.get("review_count", 0),
+            score=p.get("score", 0),
+        )
+
+    # Get products not yet posted to YouTube (primary platform check)
+    unposted = db.get_unposted_products("youtube", limit=config.max_products_per_run)
+    if not unposted:
+        logger.info("No new products to promote this cycle")
+        return
+
+    logger.info("Promoting %d products", len(unposted))
+
+    for product in unposted:
+        product_db_id = product["id"]
+        logger.info("── Product: %s ($%.2f, %.0f%% commission)",
+                    product["name"][:60], product.get("price", 0),
+                    product.get("commission_pct", 0))
+
+        # ── 3. Generate content ────────────────────────────────────────────────
+        content = generate_product_content(product)
+        if not content:
+            logger.warning("  Content generation failed — skipping")
+            continue
+
+        script      = content.get("script", "")
+        video_title = content.get("video_title", product["name"])
+        video_desc  = content.get("video_description", "")
+        tags        = content.get("tags", [])
+
+        # ── 4. Produce video ───────────────────────────────────────────────────
+        video_path = create_product_short(
+            product=product,
+            script=script,
+            output_name=f"product_{product_db_id}",
+        )
+
+        # ── 5a. YouTube ────────────────────────────────────────────────────────
+        yt_post_id = db.create_product_post(
+            product_db_id=product_db_id, platform="youtube",
+            title=video_title, content=script,
+            video_path=str(video_path) if video_path else None,
+        )
+        if video_path:
+            # Append affiliate link to description
+            full_desc = f"{video_desc}\n\nGet it here: {product.get('affiliate_url', '')}"
+            yt_id = youtube_pub.upload_short(
+                video_path=str(video_path),
+                title=video_title,
+                description=full_desc,
+                tags=tags,
+            )
+            status = "posted" if yt_id else "failed"
+            db.mark_product_post(yt_post_id, status=status, platform_post_id=yt_id,
+                                 error=None if yt_id else "YouTube upload failed")
+            logger.info("  YouTube → %s  id=%s", status, yt_id or "—")
+        else:
+            db.mark_product_post(yt_post_id, status="failed", error="Video creation failed")
+
+        # ── 5b. TikTok ─────────────────────────────────────────────────────────
+        tk_post_id = db.create_product_post(
+            product_db_id=product_db_id, platform="tiktok",
+            title=video_title, content=script,
+            video_path=str(video_path) if video_path else None,
+        )
+        if video_path:
+            tiktok_desc = (
+                f"{video_desc}\n\nGet it: {product.get('affiliate_url', '')}"
+                f"\n\n#TikTokShop #affiliate #fyp"
+            )
+            tk_id = tiktok_pub.upload_video(
+                video_path=str(video_path),
+                title=video_title,
+                description=tiktok_desc,
+                privacy="SELF_ONLY",   # change to PUBLIC_TO_EVERYONE when ready
+            )
+            status = "posted" if tk_id else "failed"
+            db.mark_product_post(tk_post_id, status=status, platform_post_id=tk_id,
+                                 error=None if tk_id else "TikTok upload failed")
+            logger.info("  TikTok → %s  id=%s", status, tk_id or "—")
+        else:
+            db.mark_product_post(tk_post_id, status="failed", error="Video creation failed")
+
+        # ── 5c. Reddit ─────────────────────────────────────────────────────────
+        reddit_title = content.get("reddit_title", video_title)
+        reddit_body  = content.get("reddit_body", "")
+        if reddit_body:
+            rd_post_id = db.create_product_post(
+                product_db_id=product_db_id, platform="reddit",
+                title=reddit_title, content=reddit_body,
+            )
+            post_ids = reddit_pub.post_to_all(reddit_title, reddit_body)
+            platform_id = ",".join(post_ids) if post_ids else None
+            status = "posted" if post_ids else "failed"
+            db.mark_product_post(rd_post_id, status=status, platform_post_id=platform_id,
+                                 error=None if post_ids else "Reddit post failed")
+            logger.info("  Reddit → %s  id=%s", status, platform_id or "—")
+
+    logger.info("Product pipeline complete.")
+    logger.info("=" * 65)
+
+
 def main():
     parser = argparse.ArgumentParser(description="ViralBot — Viral Content Creator")
-    parser.add_argument("--once", action="store_true", help="Run pipeline once and exit")
+    parser.add_argument("--once",          action="store_true", help="Run both pipelines once and exit")
+    parser.add_argument("--trends-only",   action="store_true", help="Run trend pipeline once and exit")
+    parser.add_argument("--products-only", action="store_true", help="Run product pipeline once and exit")
     args = parser.parse_args()
 
     db.init_db()
     logger.info(
-        "ViralBot ready | interval=%dh | max_trends=%d | model=%s",
+        "ViralBot ready | trends=%dh | products=%dh | model=%s",
         config.run_interval_hours,
-        config.max_trends_per_run,
+        config.product_interval_hours,
         config.claude_model,
     )
 
+    if args.trends_only:
+        run_pipeline()
+        return
+    if args.products_only:
+        run_product_pipeline()
+        return
     if args.once:
         run_pipeline()
+        run_product_pipeline()
         return
 
     scheduler = BlockingScheduler()
     scheduler.add_job(
         run_pipeline,
         trigger=IntervalTrigger(hours=config.run_interval_hours),
-        next_run_time=datetime.now(),   # run immediately on first start
+        next_run_time=datetime.now(),
         max_instances=1,
         misfire_grace_time=300,
+        id="trends",
     )
-    logger.info("Scheduler running — next cycle in %dh. Ctrl+C to stop.", config.run_interval_hours)
+    scheduler.add_job(
+        run_product_pipeline,
+        trigger=IntervalTrigger(hours=config.product_interval_hours),
+        next_run_time=datetime.now(),
+        max_instances=1,
+        misfire_grace_time=300,
+        id="products",
+    )
+    logger.info(
+        "Both pipelines running — trends every %dh, products every %dh. Ctrl+C to stop.",
+        config.run_interval_hours, config.product_interval_hours,
+    )
     try:
         scheduler.start()
     except KeyboardInterrupt:

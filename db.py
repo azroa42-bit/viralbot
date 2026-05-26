@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS trends (
     source      TEXT NOT NULL,
     score       REAL DEFAULT 0,
     raw_data    TEXT,
-    analysis    TEXT,                          -- cached JSON from pipeline/analyzer.py
+    analysis    TEXT,
     scraped_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS posts (
     title            TEXT,
     content          TEXT,
     video_path       TEXT,
-    angle_used       INTEGER DEFAULT 0,        -- which unique_angle index was used (0/1/2)
+    angle_used       INTEGER DEFAULT 0,
     platform_post_id TEXT,
     status           TEXT DEFAULT 'pending',
     error            TEXT,
@@ -35,9 +35,41 @@ CREATE TABLE IF NOT EXISTS posts (
     posted_at        TIMESTAMP,
     UNIQUE(trend_id, platform)
 );
+
+CREATE TABLE IF NOT EXISTS products (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_id     TEXT NOT NULL,
+    source         TEXT NOT NULL,   -- amazon | clickbank | tiktok_shop | manual
+    name           TEXT NOT NULL,
+    description    TEXT,
+    price          REAL DEFAULT 0,
+    commission_pct REAL DEFAULT 0,
+    affiliate_url  TEXT,
+    image_url      TEXT,
+    category       TEXT,
+    rating         REAL DEFAULT 0,
+    review_count   INTEGER DEFAULT 0,
+    score          REAL DEFAULT 0,
+    scraped_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(product_id, source)
+);
+
+CREATE TABLE IF NOT EXISTS product_posts (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_db_id    INTEGER REFERENCES products(id),
+    platform         TEXT NOT NULL,   -- youtube | tiktok | reddit
+    title            TEXT,
+    content          TEXT,
+    video_path       TEXT,
+    platform_post_id TEXT,
+    status           TEXT DEFAULT 'pending',
+    error            TEXT,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    posted_at        TIMESTAMP,
+    UNIQUE(product_db_id, platform)
+);
 """
 
-# Columns added after initial release — applied via migration, harmless if they exist
 _MIGRATIONS = [
     "ALTER TABLE trends ADD COLUMN analysis TEXT",
     "ALTER TABLE posts ADD COLUMN angle_used INTEGER DEFAULT 0",
@@ -53,7 +85,6 @@ def get_conn() -> sqlite3.Connection:
 def init_db():
     conn = get_conn()
     conn.executescript(_SCHEMA)
-    # Run migrations silently (fail = column already exists, which is fine)
     for sql in _MIGRATIONS:
         try:
             conn.execute(sql)
@@ -89,18 +120,13 @@ def insert_trend(topic: str, source: str, score: float, raw_data: dict) -> int:
 
 
 def save_analysis(trend_id: int, analysis: dict):
-    """Cache the trend analysis so we don't re-analyze on the next run."""
     conn = get_conn()
-    conn.execute(
-        "UPDATE trends SET analysis=? WHERE id=?",
-        (json.dumps(analysis), trend_id),
-    )
+    conn.execute("UPDATE trends SET analysis=? WHERE id=?", (json.dumps(analysis), trend_id))
     conn.commit()
     conn.close()
 
 
 def load_analysis(trend_id: int) -> dict | None:
-    """Return cached analysis for a trend, or None if not yet analyzed."""
     conn = get_conn()
     row = conn.execute("SELECT analysis FROM trends WHERE id=?", (trend_id,)).fetchone()
     conn.close()
@@ -110,20 +136,13 @@ def load_analysis(trend_id: int) -> dict | None:
 
 
 def get_unposted_trends(platform: str, limit: int = 10) -> list:
-    """Trends that haven't been posted to `platform` yet today."""
     conn = get_conn()
     rows = conn.execute(
-        """
-        SELECT t.id, t.topic, t.source, t.score, t.raw_data, t.analysis
-        FROM trends t
-        WHERE DATE(t.scraped_at) = DATE('now')
-          AND NOT EXISTS (
-              SELECT 1 FROM posts p
-              WHERE p.trend_id = t.id AND p.platform = ?
-          )
-        ORDER BY t.score DESC
-        LIMIT ?
-        """,
+        """SELECT t.id, t.topic, t.source, t.score, t.raw_data, t.analysis
+           FROM trends t
+           WHERE DATE(t.scraped_at) = DATE('now')
+             AND NOT EXISTS (SELECT 1 FROM posts p WHERE p.trend_id=t.id AND p.platform=?)
+           ORDER BY t.score DESC LIMIT ?""",
         (platform, limit),
     ).fetchall()
     conn.close()
@@ -131,19 +150,15 @@ def get_unposted_trends(platform: str, limit: int = 10) -> list:
 
 
 def next_unused_angle(trend_id: int) -> int:
-    """Return the lowest angle index (0/1/2) not yet used for this trend across all platforms."""
     conn = get_conn()
-    used = {
-        row[0]
-        for row in conn.execute(
-            "SELECT angle_used FROM posts WHERE trend_id=?", (trend_id,)
-        ).fetchall()
-    }
+    used = {r[0] for r in conn.execute(
+        "SELECT angle_used FROM posts WHERE trend_id=?", (trend_id,)
+    ).fetchall()}
     conn.close()
     for i in range(3):
         if i not in used:
             return i
-    return 0  # all angles used — cycle back
+    return 0
 
 
 # ── Posts ─────────────────────────────────────────────────────────────────────
@@ -168,6 +183,80 @@ def mark_post(post_id: int, status: str, platform_post_id: str = None, error: st
     conn = get_conn()
     conn.execute(
         """UPDATE posts SET status=?, platform_post_id=?, error=?,
+           posted_at=CASE WHEN ?='posted' THEN CURRENT_TIMESTAMP ELSE posted_at END
+           WHERE id=?""",
+        (status, platform_post_id, error, status, post_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+# ── Products ──────────────────────────────────────────────────────────────────
+
+def upsert_product(product_id: str, source: str, name: str, description: str,
+                   price: float, commission_pct: float, affiliate_url: str,
+                   image_url: str, category: str, rating: float,
+                   review_count: int, score: float) -> int:
+    conn = get_conn()
+    cur = conn.execute(
+        """INSERT INTO products
+             (product_id, source, name, description, price, commission_pct,
+              affiliate_url, image_url, category, rating, review_count, score)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(product_id, source) DO UPDATE SET
+             price=excluded.price, score=excluded.score,
+             rating=excluded.rating, review_count=excluded.review_count,
+             scraped_at=CURRENT_TIMESTAMP""",
+        (product_id, source, name, description, price, commission_pct,
+         affiliate_url, image_url, category, rating, review_count, score),
+    )
+    conn.commit()
+    db_id = cur.lastrowid or conn.execute(
+        "SELECT id FROM products WHERE product_id=? AND source=?", (product_id, source)
+    ).fetchone()["id"]
+    conn.close()
+    return db_id
+
+
+def get_unposted_products(platform: str, limit: int = 10) -> list:
+    """Products not yet posted to `platform` — ordered by score desc."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT p.*
+           FROM products p
+           WHERE NOT EXISTS (
+               SELECT 1 FROM product_posts pp
+               WHERE pp.product_db_id=p.id AND pp.platform=?
+           )
+           ORDER BY p.score DESC LIMIT ?""",
+        (platform, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── Product posts ─────────────────────────────────────────────────────────────
+
+def create_product_post(product_db_id: int, platform: str, title: str,
+                        content: str, video_path: str = None) -> int:
+    conn = get_conn()
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO product_posts
+           (product_db_id, platform, title, content, video_path)
+           VALUES (?,?,?,?,?)""",
+        (product_db_id, platform, title, content, video_path),
+    )
+    conn.commit()
+    post_id = cur.lastrowid
+    conn.close()
+    return post_id
+
+
+def mark_product_post(post_id: int, status: str,
+                      platform_post_id: str = None, error: str = None):
+    conn = get_conn()
+    conn.execute(
+        """UPDATE product_posts SET status=?, platform_post_id=?, error=?,
            posted_at=CASE WHEN ?='posted' THEN CURRENT_TIMESTAMP ELSE posted_at END
            WHERE id=?""",
         (status, platform_post_id, error, status, post_id),
