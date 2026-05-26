@@ -1,15 +1,12 @@
 """
-Product content generator — creates affiliate marketing content using Gemini.
+Product content generator — creates affiliate marketing content using Groq (Llama 3.3 70B).
 
 PAS (Problem-Agitate-Solution) for high-ticket items (>$50).
 Hook-Proof-CTA for low-ticket impulse buys (≤$50).
-
-Uses Google Gemini 2.0 Flash (free tier).
 """
 import json
 import logging
-from google import genai
-from google.genai import types
+from openai import OpenAI
 from config import config
 
 logger = logging.getLogger(__name__)
@@ -19,19 +16,22 @@ _client = None
 _SYSTEM = """You are an expert affiliate marketer and content creator. You create short-form
 video scripts and social media posts that drive product sales without feeling like ads.
 
-Your content rules:
+Rules:
 - Lead with the PROBLEM or RESULT, never with "I'm reviewing X"
 - Use specific numbers (ratings, prices, savings) — vague claims don't convert
 - One clear CTA at the end — don't stack multiple asks
-- Write in natural spoken language — contractions, short sentences, conversational
+- Natural spoken language — contractions, short sentences, conversational
 - Never say "affiliate link" or "sponsored" in the script — just "link in bio"
-- Output valid JSON exactly matching the requested schema. No markdown fences."""
+- Output valid JSON only. No markdown fences, no extra text outside the JSON."""
 
 
 def _get_client():
     global _client
     if _client is None:
-        _client = genai.Client(api_key=config.gemini_api_key)
+        _client = OpenAI(
+            api_key=config.groq_api_key,
+            base_url="https://api.groq.com/openai/v1",
+        )
     return _client
 
 
@@ -70,7 +70,7 @@ Description: {product.get('description', '')[:400]}
 Affiliate URL: {aff_url}
 Source: {source}
 
-Content rules:
+Rules:
 - Price > $50: use Problem-Agitate-Solution (PAS) structure
 - Price ≤ $50: use Hook-Proof-CTA structure (impulse buy)
 - Script: 40-55 seconds spoken (110-145 words)
@@ -78,7 +78,7 @@ Content rules:
 - Use the rating and review count as social proof
 - TikTok CTA: "{tiktok_cta}"
 
-Return JSON (no markdown fences):
+Return JSON only (no markdown fences):
 {{
   "video_title": "YouTube/TikTok title under 60 chars, benefit-led",
   "video_description": "2 sentences + affiliate link + #Shorts #ad",
@@ -89,16 +89,16 @@ Return JSON (no markdown fences):
 }}"""
 
     try:
-        resp = _get_client().models.generate_content(
-            model=config.gemini_model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=_SYSTEM,
-                max_output_tokens=1400,
-                temperature=0.7,
-            ),
+        resp = _get_client().chat.completions.create(
+            model=config.groq_model,
+            messages=[
+                {"role": "system", "content": _SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=1400,
+            temperature=0.7,
         )
-        result = _parse_json(resp.text)
+        result = _parse_json(resp.choices[0].message.content)
         logger.info("  Content generated for: %s", product["name"][:60])
         return result
     except Exception as e:

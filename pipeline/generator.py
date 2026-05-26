@@ -1,12 +1,15 @@
 """
-Content Generator — produces platform-specific content using trend analysis.
+Content Generator — produces platform-specific content using Groq (Llama 3.3 70B).
 
-Uses Google Gemini 2.0 Flash (free tier).
+Uniqueness enforced via:
+1. Analyzer-supplied angle (not just the trending headline)
+2. Explicit instruction to avoid the generic version
+3. Hook type + target emotion injected per platform
+4. Reddit and YouTube always get different angles
 """
 import json
 import logging
-from google import genai
-from google.genai import types
+from openai import OpenAI
 from config import config
 
 logger = logging.getLogger(__name__)
@@ -16,20 +19,22 @@ _client = None
 _SYSTEM = """You are an expert viral content creator. You create original, engaging content
 that approaches trending topics from FRESH ANGLES — never just summarizing what already exists.
 
-Your content rules:
+Rules:
 - ALWAYS use the assigned angle. Never default to summarizing the trend.
 - NEVER start with the trending headline — approach from your angle only.
 - Hook must match the specified hook_type exactly.
 - Evoke the specified target_emotion through specific details, not generic claims.
-- Write in a natural, human voice — conversational, not corporate.
-- Posts must feel like they were written by a real person who has a take, not a bot.
-- Output valid JSON exactly matching the requested schema. No markdown fences."""
+- Natural human voice — conversational, not corporate.
+- Output valid JSON only. No markdown fences, no extra text outside the JSON."""
 
 
 def _get_client():
     global _client
     if _client is None:
-        _client = genai.Client(api_key=config.gemini_api_key)
+        _client = OpenAI(
+            api_key=config.groq_api_key,
+            base_url="https://api.groq.com/openai/v1",
+        )
     return _client
 
 
@@ -45,11 +50,11 @@ def _parse_json(text: str) -> dict:
 
 def _hook_instruction(hook_type: str) -> str:
     hooks = {
-        "QUESTION":          "Open with a direct question the reader hasn't thought to ask yet.",
-        "STAT":              "Open with one specific, surprising statistic or number.",
-        "STORY":             "Open with a 1-2 sentence vivid micro-story or scenario.",
-        "COUNTERINTUITIVE":  "Open with a claim that directly contradicts common belief.",
-        "CURIOSITY_GAP":     "Open with a statement that creates an information gap — something that makes the reader NEED to read more.",
+        "QUESTION":         "Open with a direct question the reader hasn't thought to ask yet.",
+        "STAT":             "Open with one specific, surprising statistic or number.",
+        "STORY":            "Open with a 1-2 sentence vivid micro-story or scenario.",
+        "COUNTERINTUITIVE": "Open with a claim that directly contradicts common belief.",
+        "CURIOSITY_GAP":    "Open with a statement that creates an information gap — makes the reader NEED to read more.",
     }
     return hooks.get(hook_type, hooks["CURIOSITY_GAP"])
 
@@ -67,9 +72,7 @@ def generate_reddit_content(trend: dict, analysis: dict = None, angle_idx: int =
 
         revenue_note = ""
         if revenue_niche == "HIGH":
-            revenue_note = (
-                f"\nREVENUE NOTE: HIGH-CPM niche. Naturally weave in: {monetization_angle}"
-            )
+            revenue_note = f"\nREVENUE NOTE: HIGH-CPM niche. Naturally weave in: {monetization_angle}"
 
         analysis_block = f"""
 TREND ANALYSIS:
@@ -90,23 +93,23 @@ Source: {trend['source']}
 Context: {raw[:500]}
 {analysis_block}
 
-Return JSON (no markdown fences):
+Return JSON only (no markdown fences):
 {{
   "title": "Reddit post title from your unique angle — no clickbait, under 300 chars",
   "body": "3-4 paragraphs from your angle. P1: hook. P2-3: insight. P4: open question. Conversational, no bullets, no headers."
 }}"""
 
     try:
-        resp = _get_client().models.generate_content(
-            model=config.gemini_model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=_SYSTEM,
-                max_output_tokens=1200,
-                temperature=0.8,
-            ),
+        resp = _get_client().chat.completions.create(
+            model=config.groq_model,
+            messages=[
+                {"role": "system", "content": _SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=1200,
+            temperature=0.8,
         )
-        result = _parse_json(resp.text)
+        result = _parse_json(resp.choices[0].message.content)
         logger.info("  Reddit content: '%s'", result.get("title", "")[:70])
         return result
     except Exception as e:
@@ -156,25 +159,25 @@ Structure:
 
 Natural spoken language — short sentences, contractions, no jargon.
 
-Return JSON (no markdown fences):
+Return JSON only (no markdown fences):
 {{
-  "title": "YouTube title using the angle + main keyword (under 70 chars)",
+  "title": "YouTube title using angle + main keyword (under 70 chars)",
   "description": "2 punchy sentences + #Shorts #[keyword] #viral",
   "script": "Full spoken script, no stage directions",
   "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6"]
 }}"""
 
     try:
-        resp = _get_client().models.generate_content(
-            model=config.gemini_model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=_SYSTEM,
-                max_output_tokens=1200,
-                temperature=0.8,
-            ),
+        resp = _get_client().chat.completions.create(
+            model=config.groq_model,
+            messages=[
+                {"role": "system", "content": _SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=1200,
+            temperature=0.8,
         )
-        result = _parse_json(resp.text)
+        result = _parse_json(resp.choices[0].message.content)
         logger.info("  YouTube script: '%s'", result.get("title", "")[:70])
         return result
     except Exception as e:

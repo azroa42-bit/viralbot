@@ -1,13 +1,12 @@
 """
-Trend Analyzer — uses Gemini to understand WHY a trend is viral before generating content.
+Trend Analyzer — uses Groq (Llama 3.3 70B) to understand WHY a trend is viral.
 
-Uses Google Gemini 2.0 Flash (free tier — no API billing required).
-Get a key at: aistudio.google.com → Get API key
+Groq free tier: 14,400 requests/day, no billing required.
+Get a key at: console.groq.com → API Keys → Create API Key
 """
 import json
 import logging
-from google import genai
-from google.genai import types
+from openai import OpenAI
 from config import config
 
 logger = logging.getLogger(__name__)
@@ -22,13 +21,16 @@ identify original angles that haven't been covered yet.
 Be brutally specific. "It's interesting" is not analysis. "It triggers cognitive dissonance
 because people assumed X was safe but this reveals Y" is analysis.
 
-Always output valid JSON exactly matching the requested schema. No markdown fences."""
+Always output valid JSON exactly matching the requested schema. No markdown fences, no extra text."""
 
 
 def _get_client():
     global _client
     if _client is None:
-        _client = genai.Client(api_key=config.gemini_api_key)
+        _client = OpenAI(
+            api_key=config.groq_api_key,
+            base_url="https://api.groq.com/openai/v1",
+        )
     return _client
 
 
@@ -72,7 +74,7 @@ Trending title: {trend['topic']}
 Source: {trend['source']}
 Virality score: {trend['score']:.0f}{eng_signals}{body_ctx}{comment_ctx}
 
-Return JSON with this EXACT schema (no extra fields, no markdown fences):
+Return JSON with this EXACT schema (no extra fields, no markdown fences, output JSON only):
 {{
   "virality_driver": "SURPRISE",
   "core_topic": "the real underlying subject in plain language (10-15 words)",
@@ -92,16 +94,16 @@ Return JSON with this EXACT schema (no extra fields, no markdown fences):
 }}"""
 
     try:
-        resp = _get_client().models.generate_content(
-            model=config.gemini_model,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=_ANALYSIS_SYSTEM,
-                max_output_tokens=900,
-                temperature=0.7,
-            ),
+        resp = _get_client().chat.completions.create(
+            model=config.groq_model,
+            messages=[
+                {"role": "system", "content": _ANALYSIS_SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=900,
+            temperature=0.7,
         )
-        text = resp.text.strip()
+        text = resp.choices[0].message.content.strip()
         if text.startswith("```"):
             parts = text.split("```")
             text = parts[1] if len(parts) > 1 else text

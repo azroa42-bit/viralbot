@@ -6,10 +6,12 @@ load_dotenv()
 
 
 class Config:
-    # ── Gemini (free tier at aistudio.google.com) ────────────────────────────
+    # ── Groq (free tier — console.groq.com) ─────────────────────────────────
+    groq_api_key: str = os.getenv("GROQ_API_KEY", "")
+    groq_model: str = "llama-3.3-70b-versatile"
+    claude_model: str = "llama-3.3-70b-versatile"  # legacy alias used in logs
+    # Legacy Gemini key kept in case user switches back
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
-    gemini_model: str = "gemini-2.0-flash"
-    claude_model: str = "gemini-2.0-flash"  # legacy alias used in logs
 
     # ── Reddit ────────────────────────────────────────────────────────────────
     reddit_client_id: str = os.getenv("REDDIT_CLIENT_ID", "")
