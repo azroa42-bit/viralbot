@@ -160,10 +160,12 @@ def run_pipeline():
             tags = yt_content.get("tags", [])
 
             # ── 6. Produce video ──────────────────────────────────────
+            keywords = analysis.get("keywords", []) if analysis else []
             video_path = create_short(
                 title=title,
                 script=script,
                 output_name=f"trend_{trend_id}",
+                keywords=keywords,
             )
 
             post_id = db.create_post(

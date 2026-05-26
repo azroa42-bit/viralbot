@@ -6,6 +6,9 @@ load_dotenv()
 
 
 class Config:
+    # ── Pexels (free — pexels.com/api → Get Started) ────────────────────────
+    pexels_api_key: str = os.getenv("PEXELS_API_KEY", "")
+
     # ── Groq (free tier — console.groq.com) ─────────────────────────────────
     groq_api_key: str = os.getenv("GROQ_API_KEY", "")
     groq_model: str = "llama-3.3-70b-versatile"
