@@ -16,15 +16,16 @@ class Config:
     # Legacy Gemini key kept in case user switches back
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
 
-    # ── Reddit ────────────────────────────────────────────────────────────────
-    reddit_client_id: str = os.getenv("REDDIT_CLIENT_ID", "")
-    reddit_client_secret: str = os.getenv("REDDIT_CLIENT_SECRET", "")
-    reddit_username: str = os.getenv("REDDIT_USERNAME", "")
-    reddit_password: str = os.getenv("REDDIT_PASSWORD", "")
-    reddit_user_agent: str = os.getenv("REDDIT_USER_AGENT", "ViralBot/1.0")
-    reddit_post_subreddits: list = [
-        s.strip() for s in os.getenv("REDDIT_POST_SUBREDDITS", "test").split(",")
-    ]
+    # ── Instagram ─────────────────────────────────────────────────────────────
+    # Setup: developers.facebook.com → create app → Instagram Graph API product
+    # Required permissions: instagram_basic, instagram_content_publish, pages_read_engagement
+    # Generate token via Graph API Explorer, then exchange for long-lived token (60 days).
+    # Get Instagram User ID: GET /me/accounts → {page_id} → GET /{page_id}?fields=instagram_business_account
+    instagram_access_token: str = os.getenv("INSTAGRAM_ACCESS_TOKEN", "")
+    instagram_user_id: str = os.getenv("INSTAGRAM_USER_ID", "")
+    instagram_app_id: str = os.getenv("INSTAGRAM_APP_ID", "")
+    instagram_app_secret: str = os.getenv("INSTAGRAM_APP_SECRET", "")
+    instagram_token_file: str = "instagram_token.json"
 
     # ── YouTube ───────────────────────────────────────────────────────────────
     youtube_api_key: str = os.getenv("YOUTUBE_API_KEY", "")
@@ -63,8 +64,8 @@ class Config:
     product_interval_hours: int = int(os.getenv("PRODUCT_INTERVAL_HOURS", "6"))
     max_products_per_run: int = int(os.getenv("MAX_PRODUCTS_PER_RUN", "3"))
 
-    # ── Affiliate links (trend pipeline) ─────────────────────────────────────
-    # Appended to Reddit posts when topic matches a keyword
+    # ── Affiliate links ───────────────────────────────────────────────────────
+    # Appended to product post descriptions when topic matches a keyword
     # Format: "keyword:url,keyword:url"
     affiliate_links: dict = {
         k.strip(): v.strip()

@@ -5,11 +5,11 @@ Two parallel pipelines:
 
 TREND PIPELINE  (every 2h)
   Scrape → Aggregate → Enrich → Analyze → Generate → Video → Post
-  Platforms: Reddit, YouTube Shorts
+  Platforms: YouTube Shorts, TikTok, Instagram Reels
 
 PRODUCT PIPELINE  (every 6h)
   Scan affiliate markets → Score → Generate product content → Product video → Post
-  Platforms: YouTube Shorts, TikTok, Reddit
+  Platforms: YouTube Shorts, TikTok, Instagram Reels
   Sources:   Amazon PA API, ClickBank, TikTok Shop, manual products
 
 Run once:         python main.py --once
@@ -27,14 +27,13 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 import db
 from config import config
-from pipeline import aggregator, analyzer, generator
+from pipeline import aggregator, analyzer, generator, seo
 from pipeline.video import create_short
 from pipeline.product_generator import generate_product_content
 from pipeline.product_video import create_product_short
-from publishers import reddit as reddit_pub
 from publishers import youtube as youtube_pub
 from publishers import tiktok as tiktok_pub
-from scrapers import reddit as reddit_scraper
+from publishers import instagram as instagram_pub
 from scrapers import trends as trends_scraper
 from scrapers import youtube as youtube_scraper
 from scrapers.products import get_products
@@ -55,15 +54,7 @@ def _enrich_trend(trend: dict) -> dict:
     source = trend.get("source", "")
     raw = trend.get("raw_data", {})
 
-    if source.startswith("reddit/"):
-        post_id = raw.get("id")
-        if post_id:
-            comments = reddit_scraper.enrich_with_comments(post_id)
-            if comments:
-                trend["raw_data"]["top_comments"] = comments
-                logger.info("  Enriched Reddit post %s with %d comments", post_id, len(comments))
-
-    elif source.startswith("youtube/"):
+    if source.startswith("youtube/"):
         video_id = raw.get("video_id")
         if video_id:
             comments = youtube_scraper.enrich_with_comments(video_id)
@@ -80,7 +71,6 @@ def run_pipeline():
 
     # ── 1. Scrape ────────────────────────────────────────────────────
     raw = []
-    raw += reddit_scraper.get_trending(limit_per_sub=5)
     raw += youtube_scraper.get_trending(max_per_category=8)
     raw += trends_scraper.get_trending()
 
@@ -99,9 +89,9 @@ def run_pipeline():
     logger.info("Processing %d new trends", len(top_trends))
 
     for trend in top_trends:
-        trend_id = trend["id"]
+        trend_id   = trend["id"]
         topic_short = trend["topic"][:70]
-        sources = ", ".join(trend.get("raw_data", {}).get("all_sources", [trend["source"]]))
+        sources    = ", ".join(trend.get("raw_data", {}).get("all_sources", [trend["source"]]))
         logger.info("── [%d] %s", trend_id, topic_short)
         logger.info("   score=%.0f  sources=%s", trend["score"], sources)
 
@@ -109,7 +99,7 @@ def run_pipeline():
         trend = _enrich_trend(trend)
 
         # ── 4. Analyze — understand WHY it's viral ───────────────────
-        analysis = db.load_analysis(trend_id)  # use cache if available
+        analysis = db.load_analysis(trend_id)
         if not analysis:
             analysis = analyzer.analyze(trend)
             if analysis:
@@ -129,72 +119,98 @@ def run_pipeline():
             if analysis.get("revenue_niche") == "HIGH":
                 logger.info("  Monetization angle: %s", analysis.get("monetization_angle", "?"))
 
-        # ── 5a. Reddit — unique angle 0 ──────────────────────────────
-        reddit_angle = db.next_unused_angle(trend_id)
-        reddit_content = generator.generate_reddit_content(trend, analysis, angle_idx=reddit_angle)
-        if reddit_content:
-            post_id = db.create_post(
-                trend_id=trend_id,
-                platform="reddit",
-                content_type="text",
-                title=reddit_content["title"],
-                content=reddit_content["body"],
-                angle_used=reddit_angle,
-            )
-            post_ids = reddit_pub.post_to_all(reddit_content["title"], reddit_content["body"])
-            platform_id = ",".join(post_ids) if post_ids else None
-            status = "posted" if post_ids else "failed"
-            error = None if post_ids else "Reddit publish returned no post IDs"
-            db.mark_post(post_id, status=status, platform_post_id=platform_id, error=error)
-            logger.info("  Reddit → %s  id=%s", status, platform_id or "—")
-        else:
-            logger.warning("  Reddit → content generation failed")
-
-        # ── 5b. YouTube — unique angle 1 (different from Reddit) ─────
-        yt_angle = (reddit_angle + 1) % 3
+        # ── 5. Generate script ────────────────────────────────────────
+        yt_angle   = db.next_unused_angle(trend_id)
         yt_content = generator.generate_youtube_script(trend, analysis, angle_idx=yt_angle)
-        if yt_content:
-            script = yt_content.get("script", "")
-            title = yt_content.get("title", topic_short)
-            description = yt_content.get("description", "")
-            tags = yt_content.get("tags", [])
+        if not yt_content:
+            logger.warning("  Script generation failed — skipping trend")
+            continue
 
-            # ── 6. Produce video ──────────────────────────────────────
-            keywords = analysis.get("keywords", []) if analysis else []
-            video_path = create_short(
-                title=title,
-                script=script,
-                output_name=f"trend_{trend_id}",
-                keywords=keywords,
+        # ── 6. SEO enrichment for each platform ───────────────────────
+        yt_content  = seo.enrich_youtube(trend, analysis, yt_content)
+        tk_seo      = seo.enrich_tiktok(
+            topic=trend["topic"],
+            analysis=analysis,
+            description=yt_content.get("description", ""),
+            tags=yt_content.get("tags", []),
+        )
+        ig_seo      = seo.enrich_instagram(trend, analysis, yt_content)
+
+        script      = yt_content.get("script", "")
+        yt_title    = yt_content.get("title", topic_short)
+        yt_desc     = yt_content.get("description", "")
+        yt_tags     = yt_content.get("tags", [])
+
+        # ── 7. Produce video (one file shared across all platforms) ───
+        keywords   = analysis.get("keywords", []) if analysis else []
+        video_path = create_short(
+            title=yt_title,
+            script=script,
+            output_name=f"trend_{trend_id}",
+            keywords=keywords,
+        )
+
+        # ── 8a. YouTube ───────────────────────────────────────────────
+        yt_post_id = db.create_post(
+            trend_id=trend_id, platform="youtube", content_type="video",
+            title=yt_title, content=script,
+            video_path=str(video_path) if video_path else None,
+            angle_used=yt_angle,
+        )
+        if video_path:
+            yt_id  = youtube_pub.upload_short(
+                video_path=str(video_path),
+                title=yt_title,
+                description=yt_desc,
+                tags=yt_tags,
             )
-
-            post_id = db.create_post(
-                trend_id=trend_id,
-                platform="youtube",
-                content_type="video",
-                title=title,
-                content=script,
-                video_path=str(video_path) if video_path else None,
-                angle_used=yt_angle,
-            )
-
-            # ── 7. Publish to YouTube ─────────────────────────────────
-            if video_path:
-                video_id = youtube_pub.upload_short(
-                    video_path=str(video_path),
-                    title=title,
-                    description=description,
-                    tags=tags,
-                )
-                status = "posted" if video_id else "failed"
-                error = None if video_id else "YouTube upload returned no video ID"
-                db.mark_post(post_id, status=status, platform_post_id=video_id, error=error)
-                logger.info("  YouTube → %s  id=%s", status, video_id or "—")
-            else:
-                db.mark_post(post_id, status="failed", error="Video creation failed")
-                logger.warning("  YouTube → video creation failed, upload skipped")
+            status = "posted" if yt_id else "failed"
+            db.mark_post(yt_post_id, status=status, platform_post_id=yt_id,
+                         error=None if yt_id else "YouTube upload failed")
+            logger.info("  YouTube → %s  id=%s", status, yt_id or "—")
         else:
-            logger.warning("  YouTube → script generation failed")
+            db.mark_post(yt_post_id, status="failed", error="Video creation failed")
+            logger.warning("  YouTube → video creation failed")
+
+        # ── 8b. TikTok ────────────────────────────────────────────────
+        tk_post_id = db.create_post(
+            trend_id=trend_id, platform="tiktok", content_type="video",
+            title=yt_title, content=script,
+            video_path=str(video_path) if video_path else None,
+            angle_used=yt_angle,
+        )
+        if video_path:
+            tk_id  = tiktok_pub.upload_video(
+                video_path=str(video_path),
+                title=yt_title,
+                description=tk_seo["description"],
+                privacy="PUBLIC_TO_EVERYONE",
+            )
+            status = "posted" if tk_id else "failed"
+            db.mark_post(tk_post_id, status=status, platform_post_id=tk_id,
+                         error=None if tk_id else "TikTok upload failed")
+            logger.info("  TikTok → %s  id=%s", status, tk_id or "—")
+        else:
+            db.mark_post(tk_post_id, status="failed", error="Video creation failed")
+
+        # ── 8c. Instagram ─────────────────────────────────────────────
+        ig_post_id = db.create_post(
+            trend_id=trend_id, platform="instagram", content_type="video",
+            title=yt_title, content=script,
+            video_path=str(video_path) if video_path else None,
+            angle_used=yt_angle,
+        )
+        if video_path:
+            ig_id  = instagram_pub.post_reel(
+                video_path=str(video_path),
+                caption=ig_seo["caption"],
+            )
+            status = "posted" if ig_id else "failed"
+            db.mark_post(ig_post_id, status=status, platform_post_id=ig_id,
+                         error=None if ig_id else "Instagram post failed")
+            logger.info("  Instagram → %s  id=%s", status, ig_id or "—")
+        else:
+            db.mark_post(ig_post_id, status="failed", error="Video creation failed")
 
     logger.info("Pipeline run complete.")
     logger.info("=" * 65)
@@ -207,7 +223,7 @@ def run_product_pipeline():
     2. Upsert into DB, pick unposted ones sorted by revenue score
     3. Generate product content (PAS or Hook-Proof-CTA script)
     4. Produce product video with image overlay
-    5. Post to YouTube Shorts, TikTok, and Reddit
+    5. Post to YouTube Shorts, TikTok, Instagram Reels
     """
     logger.info("=" * 65)
     logger.info("Product pipeline started — %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -231,7 +247,6 @@ def run_product_pipeline():
             score=p.get("score", 0),
         )
 
-    # Get products not yet posted to YouTube (primary platform check)
     unposted = db.get_unposted_products("youtube", limit=config.max_products_per_run)
     if not unposted:
         logger.info("No new products to promote this cycle")
@@ -256,26 +271,39 @@ def run_product_pipeline():
         video_desc  = content.get("video_description", "")
         tags        = content.get("tags", [])
 
-        # ── 4. Produce video ───────────────────────────────────────────────────
+        # ── 4. SEO enrichment ─────────────────────────────────────────────────
+        # Build a minimal trend/analysis stub so SEO module has topic context
+        prod_stub   = {"topic": video_title, "source": "product", "score": 0}
+        tk_seo      = seo.enrich_tiktok(
+            topic=video_title, analysis=None,
+            description=video_desc, tags=tags,
+        )
+        ig_seo      = seo.enrich_instagram(
+            trend=prod_stub, analysis=None,
+            content={"title": video_title, "description": video_desc},
+        )
+
+        # ── 5. Produce video ───────────────────────────────────────────────────
         video_path = create_product_short(
             product=product,
             script=script,
             output_name=f"product_{product_db_id}",
         )
 
-        # ── 5a. YouTube ────────────────────────────────────────────────────────
+        affiliate_url = product.get("affiliate_url", "")
+
+        # ── 6a. YouTube ───────────────────────────────────────────────────────
         yt_post_id = db.create_product_post(
             product_db_id=product_db_id, platform="youtube",
             title=video_title, content=script,
             video_path=str(video_path) if video_path else None,
         )
         if video_path:
-            # Append affiliate link to description
-            full_desc = f"{video_desc}\n\nGet it here: {product.get('affiliate_url', '')}"
+            yt_desc_full = f"{video_desc}\n\nGet it here: {affiliate_url}"
             yt_id = youtube_pub.upload_short(
                 video_path=str(video_path),
                 title=video_title,
-                description=full_desc,
+                description=yt_desc_full,
                 tags=tags,
             )
             status = "posted" if yt_id else "failed"
@@ -285,22 +313,19 @@ def run_product_pipeline():
         else:
             db.mark_product_post(yt_post_id, status="failed", error="Video creation failed")
 
-        # ── 5b. TikTok ─────────────────────────────────────────────────────────
+        # ── 6b. TikTok ────────────────────────────────────────────────────────
         tk_post_id = db.create_product_post(
             product_db_id=product_db_id, platform="tiktok",
             title=video_title, content=script,
             video_path=str(video_path) if video_path else None,
         )
         if video_path:
-            tiktok_desc = (
-                f"{video_desc}\n\nGet it: {product.get('affiliate_url', '')}"
-                f"\n\n#TikTokShop #affiliate #fyp"
-            )
+            tk_desc = f"{tk_seo['description']}\n\nGet it: {affiliate_url}"
             tk_id = tiktok_pub.upload_video(
                 video_path=str(video_path),
                 title=video_title,
-                description=tiktok_desc,
-                privacy="SELF_ONLY",   # change to PUBLIC_TO_EVERYONE when ready
+                description=tk_desc,
+                privacy="PUBLIC_TO_EVERYONE",
             )
             status = "posted" if tk_id else "failed"
             db.mark_product_post(tk_post_id, status=status, platform_post_id=tk_id,
@@ -309,20 +334,24 @@ def run_product_pipeline():
         else:
             db.mark_product_post(tk_post_id, status="failed", error="Video creation failed")
 
-        # ── 5c. Reddit ─────────────────────────────────────────────────────────
-        reddit_title = content.get("reddit_title", video_title)
-        reddit_body  = content.get("reddit_body", "")
-        if reddit_body:
-            rd_post_id = db.create_product_post(
-                product_db_id=product_db_id, platform="reddit",
-                title=reddit_title, content=reddit_body,
+        # ── 6c. Instagram ─────────────────────────────────────────────────────
+        ig_post_id = db.create_product_post(
+            product_db_id=product_db_id, platform="instagram",
+            title=video_title, content=script,
+            video_path=str(video_path) if video_path else None,
+        )
+        if video_path:
+            ig_caption = f"{ig_seo['caption']}\n\nLink in bio 🔗"
+            ig_id = instagram_pub.post_reel(
+                video_path=str(video_path),
+                caption=ig_caption,
             )
-            post_ids = reddit_pub.post_to_all(reddit_title, reddit_body)
-            platform_id = ",".join(post_ids) if post_ids else None
-            status = "posted" if post_ids else "failed"
-            db.mark_product_post(rd_post_id, status=status, platform_post_id=platform_id,
-                                 error=None if post_ids else "Reddit post failed")
-            logger.info("  Reddit → %s  id=%s", status, platform_id or "—")
+            status = "posted" if ig_id else "failed"
+            db.mark_product_post(ig_post_id, status=status, platform_post_id=ig_id,
+                                 error=None if ig_id else "Instagram post failed")
+            logger.info("  Instagram → %s  id=%s", status, ig_id or "—")
+        else:
+            db.mark_product_post(ig_post_id, status="failed", error="Video creation failed")
 
     logger.info("Product pipeline complete.")
     logger.info("=" * 65)

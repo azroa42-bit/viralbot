@@ -1,11 +1,13 @@
 """
-Content Generator — produces platform-specific content using Groq (Llama 3.3 70B).
+Content Generator — produces video scripts using Groq (Llama 3.3 70B).
 
 Uniqueness enforced via:
 1. Analyzer-supplied angle (not just the trending headline)
 2. Explicit instruction to avoid the generic version
 3. Hook type + target emotion injected per platform
-4. Reddit and YouTube always get different angles
+
+One video is produced per trend and reused across YouTube, TikTok, and Instagram.
+Platform-specific captions/hashtags are handled by pipeline/seo.py.
 """
 import json
 import logging
@@ -61,65 +63,6 @@ def _hook_instruction(hook_type: str) -> str:
     return hooks.get(hook_type, hooks["CURIOSITY_GAP"])
 
 
-def generate_reddit_content(trend: dict, analysis: dict = None, angle_idx: int = 0) -> dict | None:
-    raw = json.dumps(trend.get("raw_data", {}), ensure_ascii=False)
-
-    analysis_block = ""
-    if analysis:
-        angles = analysis.get("unique_angles", [])
-        chosen_angle = angles[angle_idx % len(angles)] if angles else ""
-        hook_instruction = _hook_instruction(analysis.get("hook_type", "CURIOSITY_GAP"))
-        revenue_niche = analysis.get("revenue_niche", "MEDIUM")
-        monetization_angle = analysis.get("monetization_angle", "")
-
-        revenue_note = ""
-        if revenue_niche == "HIGH":
-            revenue_note = f"\nREVENUE NOTE: HIGH-CPM niche. Naturally weave in: {monetization_angle}"
-
-        analysis_block = f"""
-TREND ANALYSIS:
-- Why it's viral: {analysis.get('why_viral', '')}
-- Audience wants: {analysis.get('audience_insight', '')}
-- YOUR ASSIGNED ANGLE: {chosen_angle}
-- Hook instruction: {hook_instruction}
-- Target emotion: {analysis.get('target_emotion', 'curiosity')}
-- AVOID THIS: {analysis.get('avoid', '')}
-- Keywords: {', '.join(analysis.get('keywords', [])[:5])}{revenue_note}
-
-CRITICAL: Do NOT summarize the trend. Approach ONLY from the assigned angle."""
-
-    prompt = f"""Write a Reddit post about this topic.
-
-Trending topic: {trend['topic']}
-Source: {trend['source']}
-Context: {raw[:500]}
-{analysis_block}
-
-Return JSON only (no markdown fences):
-{{
-  "title": "Reddit post title from your unique angle — no clickbait, under 300 chars",
-  "body": "3-4 paragraphs from your angle. P1: hook. P2-3: insight. P4: open question. Conversational, no bullets, no headers."
-}}"""
-
-    try:
-        resp = _get_client().chat.completions.create(
-            model=config.groq_model,
-            messages=[
-                {"role": "system", "content": _SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
-            max_tokens=1200,
-            temperature=0.8,
-            response_format={"type": "json_object"},
-        )
-        result = _parse_json(resp.choices[0].message.content)
-        logger.info("  Reddit content: '%s'", result.get("title", "")[:70])
-        return result
-    except Exception as e:
-        logger.error("Reddit generation failed for '%s': %s", trend["topic"][:60], e)
-        return None
-
-
 def generate_youtube_script(trend: dict, analysis: dict = None, angle_idx: int = 1) -> dict | None:
     raw = json.dumps(trend.get("raw_data", {}), ensure_ascii=False)
 
@@ -162,12 +105,16 @@ Structure:
 
 Natural spoken language — short sentences, contractions, no jargon.
 
+SEO note: naturally weave the main keywords into the spoken script —
+YouTube indexes transcripts, so spoken keywords boost search ranking.
+Don't force them; make them flow in the narration organically.
+
 Return JSON only (no markdown fences):
 {{
-  "title": "YouTube title using angle + main keyword (under 70 chars)",
-  "description": "2 punchy sentences + #Shorts #[keyword] #viral",
+  "title": "YouTube title: primary keyword first, under 65 chars",
+  "description": "1 compelling sentence (max 120 chars) that includes the primary keyword — this is the search snippet. No hashtags here.",
   "script": "Full spoken script, no stage directions",
-  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5", "tag6"]
+  "tags": ["primary keyword", "tag2", "tag3", "niche tag", "topic tag", "related keyword"]
 }}"""
 
     try:
