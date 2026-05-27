@@ -134,3 +134,78 @@ Return JSON only (no markdown fences):
     except Exception as e:
         logger.error("YouTube generation failed for '%s': %s", trend["topic"][:60], e)
         return None
+
+
+def generate_clip_script(formula: dict) -> dict | None:
+    """
+    Generate a YouTube Shorts script using a viral formula extracted by
+    transcript_analyzer. The script covers the remix_topic using the exact
+    same structural formula — 100% original content, no copied material.
+
+    Args:
+        formula: dict from transcript_analyzer.analyze_transcript() containing
+                 hook_type, content_structure, viral_formula,
+                 remix_topic, remix_hook, pacing.
+
+    Returns: same JSON shape as generate_youtube_script:
+             {title, description, script, tags}
+    """
+    remix_topic   = formula.get("remix_topic", "")
+    remix_hook    = formula.get("remix_hook", "")
+    viral_formula = formula.get("viral_formula", "")
+    structure     = formula.get("content_structure", "REVEAL")
+    pacing        = formula.get("pacing", "FAST")
+    hook_type     = formula.get("hook_type", "CURIOSITY_GAP")
+    hook_instr    = _hook_instruction(hook_type)
+
+    if not remix_topic:
+        logger.warning("generate_clip_script: no remix_topic in formula")
+        return None
+
+    prompt = f"""Write a YouTube Shorts script for this topic using a proven viral formula.
+
+TOPIC: {remix_topic}
+OPENING LINE (use this verbatim as your first sentence): "{remix_hook}"
+
+FORMULA TO FOLLOW EXACTLY:
+{viral_formula}
+
+Structure: {structure}
+Pacing: {pacing}
+Hook type: {hook_type}
+Hook instruction: {hook_instr}
+
+Length: 40-55 seconds spoken (~110-145 words).
+Beat-by-beat:
+  [HOOK 0-4s]    — use the provided opening line exactly, then expand immediately.
+  [CONTENT 4-45s] — follow the formula with 2-3 specific concrete facts. Match the {pacing} pacing.
+  [CTA 45-55s]   — "Follow for more" + one strong teaser.
+
+Natural spoken language. Short sentences. Contractions. No jargon.
+Weave the main keywords into the script naturally (YouTube indexes transcripts).
+
+Return JSON only (no markdown fences):
+{{
+  "title": "YouTube title: primary keyword first, under 65 chars",
+  "description": "1 compelling sentence (max 120 chars) with primary keyword — the search snippet",
+  "script": "Full spoken script, no stage directions",
+  "tags": ["primary keyword", "tag2", "tag3", "niche tag", "topic tag", "related keyword"]
+}}"""
+
+    try:
+        resp = _get_client().chat.completions.create(
+            model=config.groq_model,
+            messages=[
+                {"role": "system", "content": _SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=1200,
+            temperature=0.8,
+            response_format={"type": "json_object"},
+        )
+        result = _parse_json(resp.choices[0].message.content)
+        logger.info("  Clip script: '%s'", result.get("title", "")[:70])
+        return result
+    except Exception as e:
+        logger.error("Clip script generation failed for '%s': %s", remix_topic[:60], e)
+        return None

@@ -64,6 +64,17 @@ class Config:
     product_interval_hours: int = int(os.getenv("PRODUCT_INTERVAL_HOURS", "6"))
     max_products_per_run: int = int(os.getenv("MAX_PRODUCTS_PER_RUN", "3"))
 
+    # ── Clip pipeline ─────────────────────────────────────────────────────────
+    # clip_mode:
+    #   inspired   (default) — analyze viral formula, create 100% original content
+    #   commentary — download the actual clip, use as background (transformative use)
+    clip_mode: str = os.getenv("CLIP_MODE", "inspired")
+    clip_interval_hours: int = int(os.getenv("CLIP_INTERVAL_HOURS", "4"))
+    max_clips_per_run: int = int(os.getenv("MAX_CLIPS_PER_RUN", "3"))
+    clip_max_duration_secs: int = int(os.getenv("CLIP_MAX_DURATION_SECS", "60"))
+    # Only analyze videos with at least this many views
+    min_views_for_clip: int = int(os.getenv("MIN_VIEWS_FOR_CLIP", "100000"))
+
     # ── Affiliate links ───────────────────────────────────────────────────────
     # Appended to product post descriptions when topic matches a keyword
     # Format: "keyword:url,keyword:url"

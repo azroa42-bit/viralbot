@@ -1,7 +1,7 @@
 """
 ViralBot — Viral Content Creator
 
-Two parallel pipelines:
+Three parallel pipelines:
 
 TREND PIPELINE  (every 2h)
   Scrape → Aggregate → Enrich → Analyze → Generate → Video → Post
@@ -12,10 +12,17 @@ PRODUCT PIPELINE  (every 6h)
   Platforms: YouTube Shorts, TikTok, Instagram Reels
   Sources:   Amazon PA API, ClickBank, TikTok Shop, manual products
 
+CLIP PIPELINE  (every 4h)
+  Scan trending videos → Fetch transcripts → Analyze viral formula
+  → Generate original content from formula → Create Short → Post
+  Platforms: YouTube Shorts, TikTok, Instagram Reels
+  Modes: inspired (default, 100% original) | commentary (clip as background)
+
 Run once:         python main.py --once
 Products only:    python main.py --products-only
 Trends only:      python main.py --trends-only
-Scheduler (both): python main.py
+Clips only:       python main.py --clips-only
+Scheduler (all):  python main.py
 """
 import argparse
 import logging
@@ -29,6 +36,8 @@ import db
 from config import config
 from pipeline import aggregator, analyzer, generator, seo
 from pipeline.video import create_short
+from pipeline.clip_video import create_clip_short
+from pipeline.transcript_analyzer import analyze_transcript
 from pipeline.product_generator import generate_product_content
 from pipeline.product_video import create_product_short
 from publishers import youtube as youtube_pub
@@ -37,6 +46,7 @@ from publishers import instagram as instagram_pub
 from scrapers import trends as trends_scraper
 from scrapers import youtube as youtube_scraper
 from scrapers.products import get_products
+from scrapers.video_downloader import get_transcript, download_clip, yt_url
 
 logging.basicConfig(
     level=logging.INFO,
@@ -357,18 +367,236 @@ def run_product_pipeline():
     logger.info("=" * 65)
 
 
+def run_clip_pipeline():
+    """
+    Clip intelligence pipeline:
+    1. Pull trending YouTube videos (reuses youtube_scraper data)
+    2. Filter for high-view videos not yet analyzed
+    3. Fetch transcript via youtube-transcript-api
+    4. LLM-analyze the viral formula (hook type, structure, key moments)
+    5. Generate 100% original script inspired by the formula (different topic)
+       OR download the clip and use it as background (CLIP_MODE=commentary)
+    6. SEO-enrich for all three platforms
+    7. Render Short and post to YouTube, TikTok, Instagram
+    """
+    logger.info("=" * 65)
+    logger.info("Clip pipeline started — %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    logger.info("Mode: %s", config.clip_mode)
+
+    # ── 1. Collect trending YouTube videos ─────────────────────────────────────
+    raw_videos = youtube_scraper.get_trending(max_per_category=10)
+    if not raw_videos:
+        logger.warning("No YouTube trending videos — check YOUTUBE_API_KEY in .env")
+        return
+
+    # Sort by view count, keep only videos above the minimum threshold
+    candidates = [
+        v for v in raw_videos
+        if v.get("raw_data", {}).get("views", 0) >= config.min_views_for_clip
+        and not db.clip_seen(v["raw_data"].get("video_id", ""))
+    ]
+    candidates.sort(key=lambda v: v["raw_data"].get("views", 0), reverse=True)
+
+    if not candidates:
+        logger.info("No new high-view videos to process this cycle")
+        return
+
+    to_process = candidates[: config.max_clips_per_run]
+    logger.info(
+        "Processing %d videos (from %d qualifying candidates)",
+        len(to_process), len(candidates),
+    )
+
+    for video in to_process:
+        raw       = video["raw_data"]
+        video_id  = raw.get("video_id", "")
+        title     = raw.get("title", video["topic"])[:200]
+        channel   = raw.get("channel", "")
+        views     = raw.get("views", 0)
+        likes     = raw.get("likes", 0)
+        duration  = raw.get("duration", 0)
+
+        logger.info("── [%s] %s", video_id, title[:70])
+        logger.info("   views=%s  likes=%s  channel=%s", f"{views:,}", f"{likes:,}", channel)
+
+        # ── 2. Fetch transcript ───────────────────────────────────────────────
+        transcript = get_transcript(video_id)
+        if not transcript:
+            logger.info("  No transcript available — skipping (captions disabled or private)")
+            # Still save to DB so we don't retry this video
+            db.save_video_clip(
+                video_id=video_id, url=yt_url(video_id),
+                title=title, channel=channel,
+                views=views, likes=likes, duration_sec=int(duration),
+                transcript=[], formula=None,
+            )
+            continue
+
+        logger.info("  Transcript: %d segments", len(transcript))
+
+        # ── 3. Analyze viral formula ──────────────────────────────────────────
+        formula = analyze_transcript(transcript, title=title, views=views, likes=likes)
+        if not formula:
+            logger.warning("  Formula analysis failed — skipping")
+            db.save_video_clip(
+                video_id=video_id, url=yt_url(video_id),
+                title=title, channel=channel,
+                views=views, likes=likes, duration_sec=int(duration),
+                transcript=transcript, formula=None,
+            )
+            continue
+
+        logger.info(
+            "  Formula: hook=%-16s structure=%-14s",
+            formula.get("hook_type", "?"),
+            formula.get("content_structure", "?"),
+        )
+        logger.info("  Remix topic: %s", formula.get("remix_topic", "?")[:80])
+        logger.info("  Remix hook:  %s", formula.get("remix_hook", "?")[:80])
+
+        # ── 4. Optionally download clip (commentary mode only) ────────────────
+        clip_path = None
+        if config.clip_mode == "commentary":
+            best_start = formula.get("best_clip_start", 0)
+            best_end   = formula.get("best_clip_end", min(best_start + 15, 60))
+            clip_path = download_clip(
+                url=yt_url(video_id),
+                output_name=f"clip_{video_id}",
+                start_sec=best_start,
+                end_sec=best_end,
+                max_duration_secs=config.clip_max_duration_secs,
+            )
+            if clip_path:
+                logger.info("  Clip downloaded: %s", clip_path.name)
+
+        # Persist to DB
+        clip_db_id = db.save_video_clip(
+            video_id=video_id, url=yt_url(video_id),
+            title=title, channel=channel,
+            views=views, likes=likes, duration_sec=int(duration),
+            transcript=transcript, formula=formula,
+            clip_path=str(clip_path) if clip_path else None,
+        )
+
+        # ── 5. Generate original script from formula ──────────────────────────
+        content = generator.generate_clip_script(formula)
+        if not content:
+            logger.warning("  Script generation failed — skipping")
+            continue
+
+        # ── 6. SEO enrichment ─────────────────────────────────────────────────
+        remix_topic = formula.get("remix_topic", "")
+        # Build minimal stubs for SEO module (no trend/analysis object here)
+        trend_stub    = {"topic": remix_topic, "source": "clip", "score": views}
+        analysis_stub = {
+            "keywords":         content.get("tags", []),
+            "core_topic":       remix_topic,
+            "virality_driver":  formula.get("hook_type", ""),
+            "target_emotion":   "curiosity",
+            "revenue_niche":    "MEDIUM",
+        }
+
+        content   = seo.enrich_youtube(trend_stub, analysis_stub, content)
+        tk_seo    = seo.enrich_tiktok(
+            topic=remix_topic, analysis=analysis_stub,
+            description=content.get("description", ""),
+            tags=content.get("tags", []),
+        )
+        ig_seo    = seo.enrich_instagram(trend_stub, analysis_stub, content)
+
+        script    = content.get("script", "")
+        yt_title  = content.get("title", remix_topic[:65])
+        yt_desc   = content.get("description", "")
+        yt_tags   = content.get("tags", [])
+        keywords  = formula.get("remix_topic", "").lower().split()[:6]
+
+        # ── 7. Produce video ───────────────────────────────────────────────────
+        video_path = create_clip_short(
+            title=yt_title,
+            script=script,
+            output_name=f"clip_{clip_db_id}",
+            clip_path=clip_path,
+            keywords=keywords,
+        )
+
+        # ── 8a. YouTube ────────────────────────────────────────────────────────
+        yt_post_id = db.create_clip_post(
+            clip_db_id=clip_db_id, platform="youtube",
+            title=yt_title, content=script,
+            video_path=str(video_path) if video_path else None,
+        )
+        if video_path:
+            yt_id = youtube_pub.upload_short(
+                video_path=str(video_path),
+                title=yt_title,
+                description=yt_desc,
+                tags=yt_tags,
+            )
+            status = "posted" if yt_id else "failed"
+            db.mark_clip_post(yt_post_id, status=status, platform_post_id=yt_id,
+                              error=None if yt_id else "YouTube upload failed")
+            logger.info("  YouTube → %s  id=%s", status, yt_id or "—")
+        else:
+            db.mark_clip_post(yt_post_id, status="failed", error="Video creation failed")
+            logger.warning("  YouTube → video creation failed")
+
+        # ── 8b. TikTok ─────────────────────────────────────────────────────────
+        tk_post_id = db.create_clip_post(
+            clip_db_id=clip_db_id, platform="tiktok",
+            title=yt_title, content=script,
+            video_path=str(video_path) if video_path else None,
+        )
+        if video_path:
+            tk_id = tiktok_pub.upload_video(
+                video_path=str(video_path),
+                title=yt_title,
+                description=tk_seo["description"],
+                privacy="PUBLIC_TO_EVERYONE",
+            )
+            status = "posted" if tk_id else "failed"
+            db.mark_clip_post(tk_post_id, status=status, platform_post_id=tk_id,
+                              error=None if tk_id else "TikTok upload failed")
+            logger.info("  TikTok → %s  id=%s", status, tk_id or "—")
+        else:
+            db.mark_clip_post(tk_post_id, status="failed", error="Video creation failed")
+
+        # ── 8c. Instagram ───────────────────────────────────────────────────────
+        ig_post_id = db.create_clip_post(
+            clip_db_id=clip_db_id, platform="instagram",
+            title=yt_title, content=script,
+            video_path=str(video_path) if video_path else None,
+        )
+        if video_path:
+            ig_id = instagram_pub.post_reel(
+                video_path=str(video_path),
+                caption=ig_seo["caption"],
+            )
+            status = "posted" if ig_id else "failed"
+            db.mark_clip_post(ig_post_id, status=status, platform_post_id=ig_id,
+                              error=None if ig_id else "Instagram post failed")
+            logger.info("  Instagram → %s  id=%s", status, ig_id or "—")
+        else:
+            db.mark_clip_post(ig_post_id, status="failed", error="Video creation failed")
+
+    logger.info("Clip pipeline complete.")
+    logger.info("=" * 65)
+
+
 def main():
     parser = argparse.ArgumentParser(description="ViralBot — Viral Content Creator")
-    parser.add_argument("--once",          action="store_true", help="Run both pipelines once and exit")
+    parser.add_argument("--once",          action="store_true", help="Run all three pipelines once and exit")
     parser.add_argument("--trends-only",   action="store_true", help="Run trend pipeline once and exit")
     parser.add_argument("--products-only", action="store_true", help="Run product pipeline once and exit")
+    parser.add_argument("--clips-only",    action="store_true", help="Run clip pipeline once and exit")
     args = parser.parse_args()
 
     db.init_db()
     logger.info(
-        "ViralBot ready | trends=%dh | products=%dh | model=%s",
+        "ViralBot ready | trends=%dh | products=%dh | clips=%dh (mode=%s) | model=%s",
         config.run_interval_hours,
         config.product_interval_hours,
+        config.clip_interval_hours,
+        config.clip_mode,
         config.claude_model,
     )
 
@@ -378,9 +606,13 @@ def main():
     if args.products_only:
         run_product_pipeline()
         return
+    if args.clips_only:
+        run_clip_pipeline()
+        return
     if args.once:
         run_pipeline()
         run_product_pipeline()
+        run_clip_pipeline()
         return
 
     scheduler = BlockingScheduler()
@@ -400,9 +632,19 @@ def main():
         misfire_grace_time=300,
         id="products",
     )
+    scheduler.add_job(
+        run_clip_pipeline,
+        trigger=IntervalTrigger(hours=config.clip_interval_hours),
+        next_run_time=datetime.now(),
+        max_instances=1,
+        misfire_grace_time=300,
+        id="clips",
+    )
     logger.info(
-        "Both pipelines running — trends every %dh, products every %dh. Ctrl+C to stop.",
-        config.run_interval_hours, config.product_interval_hours,
+        "All pipelines running — trends=%dh | products=%dh | clips=%dh. Ctrl+C to stop.",
+        config.run_interval_hours,
+        config.product_interval_hours,
+        config.clip_interval_hours,
     )
     try:
         scheduler.start()

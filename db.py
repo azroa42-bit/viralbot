@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS products (
 CREATE TABLE IF NOT EXISTS product_posts (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     product_db_id    INTEGER REFERENCES products(id),
-    platform         TEXT NOT NULL,   -- youtube | tiktok | reddit
+    platform         TEXT NOT NULL,   -- youtube | tiktok | instagram
     title            TEXT,
     content          TEXT,
     video_path       TEXT,
@@ -67,6 +67,37 @@ CREATE TABLE IF NOT EXISTS product_posts (
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     posted_at        TIMESTAMP,
     UNIQUE(product_db_id, platform)
+);
+
+CREATE TABLE IF NOT EXISTS video_clips (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    video_id     TEXT NOT NULL UNIQUE,      -- YouTube video ID
+    platform     TEXT NOT NULL DEFAULT 'youtube',
+    url          TEXT,
+    title        TEXT,
+    channel      TEXT,
+    views        INTEGER DEFAULT 0,
+    likes        INTEGER DEFAULT 0,
+    duration_sec INTEGER DEFAULT 0,
+    transcript   TEXT,                       -- JSON list[{text,start,duration}]
+    formula      TEXT,                       -- JSON from transcript_analyzer
+    clip_path    TEXT,                       -- path to downloaded clip file
+    analyzed_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS clip_posts (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    clip_db_id       INTEGER REFERENCES video_clips(id),
+    platform         TEXT NOT NULL,
+    title            TEXT,
+    content          TEXT,
+    video_path       TEXT,
+    platform_post_id TEXT,
+    status           TEXT DEFAULT 'pending',
+    error            TEXT,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    posted_at        TIMESTAMP,
+    UNIQUE(clip_db_id, platform)
 );
 """
 
@@ -257,6 +288,99 @@ def mark_product_post(post_id: int, status: str,
     conn = get_conn()
     conn.execute(
         """UPDATE product_posts SET status=?, platform_post_id=?, error=?,
+           posted_at=CASE WHEN ?='posted' THEN CURRENT_TIMESTAMP ELSE posted_at END
+           WHERE id=?""",
+        (status, platform_post_id, error, status, post_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+# ── Video clips ───────────────────────────────────────────────────────────────
+
+def clip_seen(video_id: str) -> bool:
+    """Return True if this YouTube video_id has already been analyzed."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT id FROM video_clips WHERE video_id=?", (video_id,)
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def save_video_clip(
+    video_id: str, url: str, title: str, channel: str,
+    views: int, likes: int, duration_sec: int,
+    transcript: list, formula: dict,
+    clip_path: str = None,
+) -> int:
+    """Insert or update a video clip record. Returns the DB row id."""
+    conn = get_conn()
+    cur = conn.execute(
+        """INSERT INTO video_clips
+             (video_id, url, title, channel, views, likes, duration_sec,
+              transcript, formula, clip_path)
+           VALUES (?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(video_id) DO UPDATE SET
+             transcript=excluded.transcript,
+             formula=excluded.formula,
+             clip_path=COALESCE(excluded.clip_path, clip_path),
+             analyzed_at=CURRENT_TIMESTAMP""",
+        (
+            video_id, url, title, channel, views, likes, duration_sec,
+            json.dumps(transcript), json.dumps(formula) if formula else None,
+            clip_path,
+        ),
+    )
+    conn.commit()
+    db_id = cur.lastrowid or conn.execute(
+        "SELECT id FROM video_clips WHERE video_id=?", (video_id,)
+    ).fetchone()["id"]
+    conn.close()
+    return db_id
+
+
+def get_unposted_clips(platform: str, limit: int = 5) -> list:
+    """Return analyzed clips not yet posted to `platform`, newest first."""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT vc.*
+           FROM video_clips vc
+           WHERE vc.formula IS NOT NULL
+             AND NOT EXISTS (
+               SELECT 1 FROM clip_posts cp
+               WHERE cp.clip_db_id = vc.id AND cp.platform = ?
+             )
+           ORDER BY vc.views DESC
+           LIMIT ?""",
+        (platform, limit),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def create_clip_post(
+    clip_db_id: int, platform: str,
+    title: str, content: str, video_path: str = None,
+) -> int:
+    conn = get_conn()
+    cur = conn.execute(
+        """INSERT OR IGNORE INTO clip_posts
+           (clip_db_id, platform, title, content, video_path)
+           VALUES (?,?,?,?,?)""",
+        (clip_db_id, platform, title, content, video_path),
+    )
+    conn.commit()
+    post_id = cur.lastrowid
+    conn.close()
+    return post_id
+
+
+def mark_clip_post(post_id: int, status: str,
+                   platform_post_id: str = None, error: str = None):
+    conn = get_conn()
+    conn.execute(
+        """UPDATE clip_posts SET status=?, platform_post_id=?, error=?,
            posted_at=CASE WHEN ?='posted' THEN CURRENT_TIMESTAMP ELSE posted_at END
            WHERE id=?""",
         (status, platform_post_id, error, status, post_id),
