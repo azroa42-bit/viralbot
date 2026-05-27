@@ -48,9 +48,13 @@ from scrapers import youtube as youtube_scraper
 from scrapers.products import get_products
 from scrapers.video_downloader import get_transcript, download_clip, yt_url
 
+# Force UTF-8 on Windows so Unicode chars in log messages don't crash
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s  %(levelname)-7s  %(name)s — %(message)s",
+    format="%(asctime)s  %(levelname)-7s  %(name)s - %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("viralbot")
@@ -588,9 +592,20 @@ def main():
     parser.add_argument("--trends-only",   action="store_true", help="Run trend pipeline once and exit")
     parser.add_argument("--products-only", action="store_true", help="Run product pipeline once and exit")
     parser.add_argument("--clips-only",    action="store_true", help="Run clip pipeline once and exit")
+    parser.add_argument("--dry-run",       action="store_true", help="Generate content and videos but do NOT publish")
     args = parser.parse_args()
 
     db.init_db()
+
+    if args.dry_run:
+        # Patch all publisher functions to no-ops so nothing gets uploaded.
+        # The pipelines still scrape, analyze, generate scripts, and render videos.
+        _noop = lambda *a, **kw: None
+        youtube_pub.upload_short   = _noop
+        tiktok_pub.upload_video    = _noop
+        instagram_pub.post_reel    = _noop
+        logger.info("★ DRY RUN — scrape / generate / render only, NO publishing ★")
+
     logger.info(
         "ViralBot ready | trends=%dh | products=%dh | clips=%dh (mode=%s) | model=%s",
         config.run_interval_hours,
