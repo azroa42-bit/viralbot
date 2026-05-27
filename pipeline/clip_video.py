@@ -192,15 +192,22 @@ def create_clip_short(
                 )
 
         if make_frame is None:
-            # Inspired mode or clip extraction failed → stock images
+            # Inspired mode or clip extraction failed → real topic images + video frames
+            from scrapers.image_fetcher import get_topic_visuals
             kws = keywords or title.lower().split()[:5]
-            images = _fetch_images(kws, count=8)
+            images = get_topic_visuals(
+                title=title,
+                keywords=kws,
+                total_needed=14,
+                target_duration=total_duration,
+                include_video_frames=True,
+            )
             if not images:
                 n_slots = max(1, int(total_duration / IMAGE_CYCLE_SECS) + 1)
                 images = [_gradient_image(i) for i in range(n_slots)]
                 logger.info("  Background mode: gradient (%d slots)", n_slots)
             else:
-                logger.info("  Background mode: stock images (%d)", len(images))
+                logger.info("  Background mode: %d topic visuals", len(images))
             make_frame = _make_frame_fn(images, caption_blocks, total_duration, title)
 
         # ── 3. Render ───────────────────────────────────────────────

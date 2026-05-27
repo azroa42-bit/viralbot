@@ -329,13 +329,22 @@ def create_short(title: str, script: str, output_name: str = None,
                     len(caption_blocks),
                     total_duration / max(len(caption_blocks), 1))
 
-        # ── 3. Background images ──────────────────────────────────
+        # ── 3. Background visuals (real topic images + video frames) ─
+        from scrapers.image_fetcher import get_topic_visuals
         kws    = keywords or title.lower().split()[:5]
-        images = _fetch_images(kws, count=8)
+        images = get_topic_visuals(
+            title=title,
+            keywords=kws,
+            total_needed=14,
+            target_duration=total_duration,
+            include_video_frames=True,
+        )
         if not images:
-            logger.info("  No Pexels images — using gradient fallback")
+            logger.info("  No visuals found — using gradient fallback")
             n_slots = max(1, int(total_duration / IMAGE_CYCLE_SECS) + 1)
             images  = [_gradient_image(i) for i in range(n_slots)]
+        else:
+            logger.info("  Visuals: %d frames (images + clips)", len(images))
 
         # ── 4. Build VideoClip ────────────────────────────────────
         make_frame = _make_frame_fn(images, caption_blocks, total_duration, title)
